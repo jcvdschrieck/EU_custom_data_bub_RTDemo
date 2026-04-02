@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { getQueue, getMetrics } from '../api'
 import axios from 'axios'
 
-const COUNTRY = { FR:'France', DE:'Germany', ES:'Spain', IT:'Italy', NL:'Netherlands', PL:'Poland' }
+const COUNTRY = { FR:'France', DE:'Germany', ES:'Spain', IT:'Italy', NL:'Netherlands', PL:'Poland', IE:'Ireland' }
 
 // ── Period presets ────────────────────────────────────────────────────────────
 const PERIODS = [
@@ -110,8 +110,6 @@ function TxTable({ items, prevIds }) {
   )
 }
 
-const COUNTRY = { FR:'France', DE:'Germany', ES:'Spain', IT:'Italy', NL:'Netherlands', PL:'Poland' }
-
 // ── Alarms panel ──────────────────────────────────────────────────────────────
 function AlarmsPanel() {
   const [alarms, setAlarms] = useState([])
@@ -147,7 +145,7 @@ function AlarmsPanel() {
             No active alarms. VAT ratio deviation alarms will appear here when triggered.
             <br />
             <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-              Scenario: GourmetShop Lyon → PL alarm fires during week 2 of March 2026.
+              Scenario: TechZone GmbH → IE alarm fires during week 2 of March 2026.
             </span>
           </div>
         </div>

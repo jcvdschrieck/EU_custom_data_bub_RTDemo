@@ -12,9 +12,14 @@ Upon each transaction arrival:
 
 Scenario note
 ─────────────
-GourmetShop Lyon → PL is seeded with inflated VAT rates in week 2 of March
-(8–14 Mar 2026), driving the ratio from ~5.5% to ~19%, well above the 25%
-deviation threshold.
+TechZone GmbH (SUP001, DE) → IE is seeded with zero-rate fraud in week 2 of March
+(8–14 Mar 2026): electronics are billed at 0% instead of the correct 23%.
+This drives the 7-day VAT/value ratio from ~19% to ~0%, far exceeding the 25%
+deviation threshold and triggering an alarm.
+
+Only Ireland-bound transactions are tagged as suspicious (SUSPICIOUS_COUNTRIES).
+Other supplier/country pairs may also trigger the ratio alarm, but only IE
+transactions are pushed to the suspicious transactions queue.
 """
 from __future__ import annotations
 
@@ -26,6 +31,10 @@ from lib.config import EUROPEAN_CUSTOM_DB
 MIN_CURRENT_TX    = 3    # minimum transactions needed in the 7-day window
 MIN_HISTORICAL_TX = 5    # minimum transactions needed in the 8-week baseline
 DEVIATION_THRESHOLD = 0.25   # 25 %
+
+# Only transactions destined for these countries are tagged suspicious and
+# forwarded to the agent processing queue.
+SUSPICIOUS_COUNTRIES: set[str] = {"IE"}
 
 
 # ── Internal DB helpers (read from European Custom DB) ────────────────────────
@@ -128,7 +137,8 @@ def check_alarm(tx: dict) -> dict | None:
     # ── 1. Check for existing active alarm ────────────────────────────────────
     active = _get_active_alarm(alarm_key, tx_date[:19])
     if active:
-        _mark_suspicious(tx_id, active["id"])
+        if buyer_country in SUSPICIOUS_COUNTRIES:
+            _mark_suspicious(tx_id, active["id"])
         return None          # no duplicate
 
     # ── 2. Compute time windows ───────────────────────────────────────────────
@@ -172,7 +182,8 @@ def check_alarm(tx: dict) -> dict | None:
         ratio_historical=round(ratio_hist, 6),
         deviation_pct=round(deviation * 100, 1),
     )
-    _mark_suspicious(tx_id, alarm_id)
+    if buyer_country in SUSPICIOUS_COUNTRIES:
+        _mark_suspicious(tx_id, alarm_id)
 
     return {
         "id":                alarm_id,

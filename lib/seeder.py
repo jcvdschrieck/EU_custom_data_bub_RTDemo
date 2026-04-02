@@ -121,21 +121,23 @@ def seed_european_custom_db() -> int:
 
 def _scenario_transactions(d: date) -> list[dict]:
     """
-    Alarm scenario: GourmetShop Lyon (SUP007, FR) → PL
+    Alarm scenario: TechZone GmbH (SUP001, DE) → IE
     During week 2 of March (08–14), 8 transactions per day are injected where
-    the supplier mistakenly applies the Polish standard VAT rate (23%) instead
-    of the correct reduced food rate (8%).  This drives the 7-day VAT/value
-    ratio from ~5.5% (historical FR food rate applied by error) to ~19%,
-    far exceeding the 25% deviation threshold and triggering an alarm.
+    the supplier fraudulently applies 0% VAT instead of Ireland's standard
+    23% rate on electronics.  This drives the 7-day VAT/value ratio from ~19%
+    (historical correct electronics rate) to ~0%, triggering the alarm.
+    Only IE-bound transactions are flagged suspicious per SUSPICIOUS_COUNTRIES.
     """
-    SCENARIO_SUPPLIER = next(s for s in SUPPLIERS if s["id"] == "SUP007")
-    BUYER_COUNTRY  = "PL"
-    WRONG_VAT_RATE = 0.23   # PL standard rate (food should be 8%)
-    CORRECT_RATE   = VAT_RATES[BUYER_COUNTRY]["food"]   # 0.08
+    SCENARIO_SUPPLIER = next(s for s in SUPPLIERS if s["id"] == "SUP001")
+    BUYER_COUNTRY  = "IE"
+    WRONG_VAT_RATE = 0.00   # Fraudulent zero-rate (correct is 23% for electronics)
+    CORRECT_RATE   = VAT_RATES[BUYER_COUNTRY]["electronics"]   # 0.23
 
     rows = []
+    # Only pick electronics products for the scenario
+    electronics_products = [(d, c, p) for d, c, p in SCENARIO_SUPPLIER["products"] if c == "electronics"]
     for _ in range(8):
-        description, category, base_price = random.choice(SCENARIO_SUPPLIER["products"])
+        description, category, base_price = random.choice(electronics_products)
         value      = round(base_price * random.uniform(0.85, 1.15), 2)
         vat_rate   = WRONG_VAT_RATE
         vat_amount = round(value * vat_rate, 2)

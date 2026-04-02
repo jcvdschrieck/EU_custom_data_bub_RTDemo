@@ -62,6 +62,49 @@ CREATE INDEX IF NOT EXISTS idx_alarm_key     ON alarms(alarm_key, active);
 CREATE INDEX IF NOT EXISTS idx_alarm_expires ON alarms(expires_at);
 """
 
+_AGENT_LOG_DDL = """
+CREATE TABLE IF NOT EXISTS agent_log (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    transaction_id   TEXT    NOT NULL,
+    seller_name      TEXT    NOT NULL,
+    buyer_country    TEXT    NOT NULL,
+    item_description TEXT    NOT NULL,
+    item_category    TEXT    NOT NULL,
+    value            REAL    NOT NULL,
+    vat_rate         REAL    NOT NULL,
+    correct_vat_rate REAL    NOT NULL,
+    verdict          TEXT    NOT NULL,
+    reasoning        TEXT    NOT NULL,
+    sent_to_ireland  INTEGER NOT NULL DEFAULT 0,
+    processed_at     TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_log_tx ON agent_log(transaction_id);
+"""
+
+_IRELAND_QUEUE_DDL = """
+CREATE TABLE IF NOT EXISTS ireland_queue (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    transaction_id   TEXT    NOT NULL,
+    seller_name      TEXT    NOT NULL,
+    seller_country   TEXT    NOT NULL,
+    item_description TEXT    NOT NULL,
+    item_category    TEXT    NOT NULL,
+    value            REAL    NOT NULL,
+    vat_rate         REAL    NOT NULL,
+    correct_vat_rate REAL    NOT NULL,
+    vat_amount       REAL    NOT NULL,
+    transaction_date TEXT    NOT NULL,
+    alarm_key        TEXT    NOT NULL,
+    deviation_pct    REAL,
+    ratio_current    REAL,
+    ratio_historical REAL,
+    agent_verdict    TEXT    NOT NULL,
+    agent_reasoning  TEXT    NOT NULL,
+    queued_at        TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ireland_queue_tx ON ireland_queue(transaction_id);
+"""
+
 
 def _connect(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(path, check_same_thread=False)
@@ -73,15 +116,20 @@ def _connect(path: Path) -> sqlite3.Connection:
 
 def _migrate_european_custom_db(conn: sqlite3.Connection) -> None:
     """Add columns / tables introduced after initial schema."""
-    for col, default in [("suspicious", "0"), ("alarm_id", "NULL")]:
+    for col, definition in [
+        ("suspicious",     "INTEGER DEFAULT 0"),
+        ("alarm_id",       "INTEGER DEFAULT NULL"),
+        ("suspicion_level","TEXT    DEFAULT NULL"),
+    ]:
         try:
-            conn.execute(f"ALTER TABLE transactions ADD COLUMN {col} INTEGER DEFAULT {default}")
+            conn.execute(f"ALTER TABLE transactions ADD COLUMN {col} {definition}")
         except sqlite3.OperationalError:
             pass   # already exists
-    for stmt in _ALARM_DDL.strip().split(";"):
-        s = stmt.strip()
-        if s:
-            conn.execute(s)
+    for ddl in [_ALARM_DDL, _AGENT_LOG_DDL, _IRELAND_QUEUE_DDL]:
+        for stmt in ddl.strip().split(";"):
+            s = stmt.strip()
+            if s:
+                conn.execute(s)
 
 
 def init_european_custom_db() -> None:
@@ -369,9 +417,97 @@ def get_suspicious_transactions(limit: int = 50) -> list[dict]:
 
 
 def reset_alarms() -> None:
-    """Clear all alarms and suspicious flags (called on simulation reset)."""
+    """Clear all alarms, suspicious flags, agent log and ireland queue (simulation reset)."""
     conn = _connect(EUROPEAN_CUSTOM_DB)
     with conn:
         conn.execute("DELETE FROM alarms")
-        conn.execute("UPDATE transactions SET suspicious=0, alarm_id=NULL")
+        conn.execute("DELETE FROM agent_log")
+        conn.execute("DELETE FROM ireland_queue")
+        conn.execute(
+            "UPDATE transactions SET suspicious=0, alarm_id=NULL, suspicion_level=NULL"
+        )
     conn.close()
+
+
+# ── Agent log ─────────────────────────────────────────────────────────────────
+
+def insert_agent_log(entry: dict) -> None:
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    with conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO agent_log
+            (transaction_id, seller_name, buyer_country, item_description,
+             item_category, value, vat_rate, correct_vat_rate,
+             verdict, reasoning, sent_to_ireland, processed_at)
+            VALUES
+            (:transaction_id, :seller_name, :buyer_country, :item_description,
+             :item_category, :value, :vat_rate, :correct_vat_rate,
+             :verdict, :reasoning, :sent_to_ireland, :processed_at)
+            """,
+            entry,
+        )
+    conn.close()
+
+
+def get_agent_log(limit: int = 100) -> list[dict]:
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    rows = conn.execute(
+        "SELECT * FROM agent_log ORDER BY id DESC LIMIT ?", (limit,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def update_suspicion_level(transaction_id: str, level: str) -> None:
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    with conn:
+        conn.execute(
+            "UPDATE transactions SET suspicion_level=? WHERE transaction_id=?",
+            (level, transaction_id),
+        )
+    conn.close()
+
+
+def clear_suspicious_flag(transaction_id: str) -> None:
+    """Remove suspicious flag when agent clears the transaction."""
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    with conn:
+        conn.execute(
+            "UPDATE transactions SET suspicious=0, alarm_id=NULL, suspicion_level=NULL "
+            "WHERE transaction_id=?",
+            (transaction_id,),
+        )
+    conn.close()
+
+
+# ── Ireland queue ─────────────────────────────────────────────────────────────
+
+def insert_ireland_queue(entry: dict) -> None:
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    with conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO ireland_queue
+            (transaction_id, seller_name, seller_country, item_description,
+             item_category, value, vat_rate, correct_vat_rate, vat_amount,
+             transaction_date, alarm_key, deviation_pct, ratio_current,
+             ratio_historical, agent_verdict, agent_reasoning, queued_at)
+            VALUES
+            (:transaction_id, :seller_name, :seller_country, :item_description,
+             :item_category, :value, :vat_rate, :correct_vat_rate, :vat_amount,
+             :transaction_date, :alarm_key, :deviation_pct, :ratio_current,
+             :ratio_historical, :agent_verdict, :agent_reasoning, :queued_at)
+            """,
+            entry,
+        )
+    conn.close()
+
+
+def get_ireland_queue(limit: int = 100) -> list[dict]:
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    rows = conn.execute(
+        "SELECT * FROM ireland_queue ORDER BY id DESC LIMIT ?", (limit,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]

@@ -51,6 +51,12 @@ export default function EclLayout({ children }) {
         <NavLink to="/suspicious" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
           Suspicious Transactions
         </NavLink>
+        <NavLink to="/agent-log"  className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
+          Agent Log
+        </NavLink>
+        <NavLink to="/ireland"    className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
+          🇮🇪 Ireland Queue
+        </NavLink>
       </nav>
 
       {/* Page content */}

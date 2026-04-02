@@ -61,13 +61,13 @@ state = SimState()
 
 # ── Background asyncio task ────────────────────────────────────────────────────
 
-async def simulation_loop(fire_callback: Callable[[list[dict]], None]) -> None:
+async def simulation_loop(fire_callback) -> None:
     """
     Tick every 50 ms. When running, advance simulated time and fire any
     pending transactions whose timestamp has passed.
 
-    fire_callback(rows) is called with a list of transaction dicts to
-    write to the European Custom DB and push to the live queue.
+    fire_callback(rows) must be an async coroutine function that writes rows
+    to the European Custom DB and pushes them to the live queue.
     """
     from lib.database import get_pending_sim_transactions, mark_fired, get_sim_counts
 
@@ -102,7 +102,7 @@ async def simulation_loop(fire_callback: Callable[[list[dict]], None]) -> None:
         if pending:
             ids = [r["transaction_id"] for r in pending]
             mark_fired(ids)
-            fire_callback(pending)
+            await fire_callback(pending)
             state.fired_count += len(pending)
             for tx in pending:
                 state.add_recent(tx)

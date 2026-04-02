@@ -5,7 +5,7 @@ B2C OSS rule (EU, since Jul 2021): the VAT rate of the DESTINATION country appli
 Suppliers must charge and remit the buyer's country VAT rate.
 """
 
-COUNTRIES = ["FR", "DE", "ES", "IT", "NL", "PL"]
+COUNTRIES = ["FR", "DE", "ES", "IT", "NL", "PL", "IE"]
 
 COUNTRY_NAMES = {
     "FR": "France",
@@ -14,6 +14,7 @@ COUNTRY_NAMES = {
     "IT": "Italy",
     "NL": "Netherlands",
     "PL": "Poland",
+    "IE": "Ireland",
 }
 
 # Correct VAT rates per destination country and product category
@@ -79,6 +80,17 @@ VAT_RATES: dict[str, dict[str, float]] = {
         "food":             0.08,
         "books":            0.05,
         "health":           0.08,
+        "home_goods":       0.23,
+        "cosmetics":        0.23,
+        "sports":           0.23,
+        "auto_accessories": 0.23,
+    },
+    "IE": {
+        "electronics":      0.23,
+        "clothing":         0.23,
+        "food":             0.00,   # zero-rated in Ireland
+        "books":            0.00,   # zero-rated in Ireland
+        "health":           0.00,   # zero-rated in Ireland
         "home_goods":       0.23,
         "cosmetics":        0.23,
         "sports":           0.23,

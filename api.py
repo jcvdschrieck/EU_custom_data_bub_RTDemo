@@ -10,6 +10,8 @@ GET  /api/transactions          paginated historical query
 GET  /api/metrics               VAT aggregates with filters
 GET  /api/alarms                alarm list (active_only optional)
 GET  /api/suspicious            last 50 suspicious transactions
+GET  /api/agent-log             agent processing history
+GET  /api/ireland-queue         transactions forwarded to Ireland investigation
 GET  /api/simulation/status
 POST /api/simulation/start
 POST /api/simulation/pause
@@ -24,6 +26,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -42,6 +45,12 @@ from lib.database import (
     get_suspicious_transactions,
     expire_old_alarms,
     reset_alarms,
+    insert_agent_log,
+    get_agent_log,
+    insert_ireland_queue,
+    get_ireland_queue,
+    update_suspicion_level,
+    clear_suspicious_flag,
 )
 from lib.simulator import state, simulation_loop
 from lib.catalog import SUPPLIERS, COUNTRY_NAMES
@@ -51,15 +60,19 @@ from lib.catalog import SUPPLIERS, COUNTRY_NAMES
 _live_queue:  deque[dict] = deque(maxlen=QUEUE_SIZE)
 _live_alarms: list[dict]  = []     # active alarms raised this session
 
+# ── Agent processing queue ────────────────────────────────────────────────────
 
-def _fire_transactions(rows: list[dict]) -> None:
+_agent_queue: asyncio.Queue = None   # type: ignore  # initialised in lifespan
+
+
+async def _fire_transactions(rows: list[dict]) -> None:
     """Called by the simulation loop for each batch of due transactions."""
     from lib.alarm_checker import check_alarm
 
     for row in rows:
         insert_transaction(row)
 
-        # Run alarm check after DB write (checker reads from European Custom DB)
+        # Run alarm check after DB write
         alarm = check_alarm(row)
         if alarm:
             _live_alarms.insert(0, alarm)
@@ -74,28 +87,115 @@ def _fire_transactions(rows: list[dict]) -> None:
 
         _live_queue.appendleft(row)
 
+        # If suspicious, enqueue for agent processing (non-blocking)
+        if row.get("suspicious") and _agent_queue is not None:
+            # Attach alarm context so agent worker can build ireland_queue entry
+            alarm_context = next(
+                (a for a in _live_alarms
+                 if a["alarm_key"] == f"{row['seller_id']}|{row['buyer_country']}"),
+                {},
+            )
+            _agent_queue.put_nowait({"tx": row, "alarm": alarm_context})
+
     # Expire stale alarms
     if rows:
         expire_old_alarms(rows[-1]["transaction_date"][:19])
+
+
+async def _agent_worker() -> None:
+    """Background coroutine: picks suspicious transactions from the queue and analyses them."""
+    import concurrent.futures
+    from lib.agent_bridge import analyse_transaction_sync
+
+    loop = asyncio.get_event_loop()
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+
+    while True:
+        item = await _agent_queue.get()
+        tx    = item["tx"]
+        alarm = item["alarm"]
+        try:
+            result = await loop.run_in_executor(
+                executor,
+                analyse_transaction_sync,
+                tx,
+            )
+            verdict   = result.get("verdict", "uncertain")
+            reasoning = result.get("reasoning", "")
+            now_str   = datetime.now(timezone.utc).isoformat()
+
+            sent_to_ireland = 1 if verdict == "incorrect" else 0
+
+            insert_agent_log({
+                "transaction_id":   tx["transaction_id"],
+                "seller_name":      tx["seller_name"],
+                "buyer_country":    tx["buyer_country"],
+                "item_description": tx["item_description"],
+                "item_category":    tx["item_category"],
+                "value":            tx["value"],
+                "vat_rate":         tx["vat_rate"],
+                "correct_vat_rate": tx["correct_vat_rate"],
+                "verdict":          verdict,
+                "reasoning":        reasoning,
+                "sent_to_ireland":  sent_to_ireland,
+                "processed_at":     now_str,
+            })
+
+            if verdict == "incorrect":
+                # Upgrade suspicion level to high
+                update_suspicion_level(tx["transaction_id"], "high")
+                insert_ireland_queue({
+                    "transaction_id":   tx["transaction_id"],
+                    "seller_name":      tx["seller_name"],
+                    "seller_country":   tx["seller_country"],
+                    "item_description": tx["item_description"],
+                    "item_category":    tx["item_category"],
+                    "value":            tx["value"],
+                    "vat_rate":         tx["vat_rate"],
+                    "correct_vat_rate": tx["correct_vat_rate"],
+                    "vat_amount":       tx["vat_amount"],
+                    "transaction_date": tx["transaction_date"],
+                    "alarm_key":        alarm.get("alarm_key", ""),
+                    "deviation_pct":    alarm.get("deviation_pct"),
+                    "ratio_current":    alarm.get("ratio_current"),
+                    "ratio_historical": alarm.get("ratio_historical"),
+                    "agent_verdict":    verdict,
+                    "agent_reasoning":  reasoning,
+                    "queued_at":        now_str,
+                })
+            else:
+                # Agent cleared the transaction — remove suspicious flag
+                clear_suspicious_flag(tx["transaction_id"])
+
+        except Exception as exc:
+            # Never let worker crash
+            import traceback
+            print(f"[agent_worker] error: {exc}\n{traceback.format_exc()}")
+        finally:
+            _agent_queue.task_done()
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _agent_queue
     from lib.database import init_european_custom_db, init_simulation_db
     init_european_custom_db()
     init_simulation_db()
-    task = asyncio.create_task(simulation_loop(_fire_transactions))
+    _agent_queue = asyncio.Queue()
+    sim_task    = asyncio.create_task(simulation_loop(_fire_transactions))
+    agent_task  = asyncio.create_task(_agent_worker())
     yield
-    task.cancel()
+    sim_task.cancel()
+    agent_task.cancel()
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
     title="European Custom Data Hub — RTDemo",
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -178,6 +278,18 @@ def api_get_suspicious(limit: int = Query(50, ge=1, le=200)):
     return get_suspicious_transactions(limit=limit)
 
 
+# ── Agent log & Ireland queue ─────────────────────────────────────────────────
+
+@app.get("/api/agent-log")
+def api_agent_log(limit: int = Query(100, ge=1, le=500)):
+    return get_agent_log(limit=limit)
+
+
+@app.get("/api/ireland-queue")
+def api_ireland_queue(limit: int = Query(100, ge=1, le=500)):
+    return get_ireland_queue(limit=limit)
+
+
 # ── Simulation control ────────────────────────────────────────────────────────
 
 @app.get("/api/simulation/status")
@@ -185,7 +297,8 @@ def sim_status():
     counts = get_sim_counts()
     s = state.to_dict()
     s.update(counts)
-    s["active_alarms"] = len([a for a in get_alarms(active_only=True)])
+    s["active_alarms"]  = len([a for a in get_alarms(active_only=True)])
+    s["agent_queue_len"] = _agent_queue.qsize() if _agent_queue else 0
     return s
 
 

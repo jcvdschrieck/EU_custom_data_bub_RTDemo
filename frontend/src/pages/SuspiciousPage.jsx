@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { getMetrics } from '../api'
 import axios from 'axios'
 
-const COUNTRY = { FR:'France', DE:'Germany', ES:'Spain', IT:'Italy', NL:'Netherlands', PL:'Poland' }
+const COUNTRY = { FR:'France', DE:'Germany', ES:'Spain', IT:'Italy', NL:'Netherlands', PL:'Poland', IE:'Ireland' }
 
 function fmt(n, dec = 0) {
   if (n == null) return '—'
@@ -70,7 +70,7 @@ export default function SuspiciousPage() {
               VAT/value ratio deviates &gt;25% from its 8-week baseline.
               <br />
               <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>
-                Scenario: GourmetShop Lyon → PL triggers in week 2 of March (8–14 Mar 2026).
+                Scenario: TechZone GmbH → IE triggers in week 2 of March (8–14 Mar 2026).
               </span>
             </div>
           </div>
