@@ -487,6 +487,23 @@ def get_agent_log_by_tx(transaction_id: str) -> dict | None:
     return d
 
 
+def flag_transaction_suspicious(transaction_id: str, alarm_id: int) -> None:
+    """
+    DB-subscriber action triggered by the 'alarm_fired' broker topic.
+    Updates the stored transaction record using its identifier — sets
+    suspicious=1, links the alarm, and marks suspicion_level as 'medium'.
+    """
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    with conn:
+        conn.execute(
+            "UPDATE transactions "
+            "SET suspicious=1, alarm_id=?, suspicion_level='medium' "
+            "WHERE transaction_id=?",
+            (alarm_id, transaction_id),
+        )
+    conn.close()
+
+
 def update_suspicion_level(transaction_id: str, level: str) -> None:
     conn = _connect(EUROPEAN_CUSTOM_DB)
     with conn:

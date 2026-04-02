@@ -121,8 +121,21 @@ def _mark_suspicious(transaction_id: str, alarm_id: int) -> None:
 def check_alarm(tx: dict) -> dict | None:
     """
     Run the alarm check for a just-inserted transaction.
-    Returns the new alarm dict if one was raised, else None.
-    Call this AFTER the transaction has been written to the European Custom DB.
+
+    Returns a result dict when the transaction is suspicious:
+        {
+            "suspicious":  True,
+            "alarm_id":    int,          # DB id of the active alarm
+            "new_alarm":   dict | None,  # populated only when a new alarm is raised
+        }
+    Returns None when the transaction is not suspicious.
+
+    Call this AFTER the transaction has been written to the European Custom DB
+    (the ratio queries read from the transactions table).
+
+    NOTE: this function intentionally does NOT update the transaction's
+    suspicious flag — that is the responsibility of the DB-flag subscriber
+    on the "alarm_fired" broker topic.
     """
     supplier_id   = tx["seller_id"]
     supplier_name = tx["seller_name"]
@@ -131,7 +144,7 @@ def check_alarm(tx: dict) -> dict | None:
     tx_id         = tx["transaction_id"]
     alarm_key     = f"{supplier_id}|{buyer_country}"
 
-    # Only raise alarms / mark suspicious for SUSPICIOUS_COUNTRIES
+    # Only raise alarms for SUSPICIOUS_COUNTRIES
     if buyer_country not in SUSPICIOUS_COUNTRIES:
         return None
 
@@ -141,9 +154,9 @@ def check_alarm(tx: dict) -> dict | None:
     # ── 1. Check for existing active alarm ────────────────────────────────────
     active = _get_active_alarm(alarm_key, tx_date[:19])
     if active:
-        if buyer_country in SUSPICIOUS_COUNTRIES:
-            _mark_suspicious(tx_id, active["id"])
-        return None          # no duplicate
+        # Transaction falls under an active alarm — flag it suspicious
+        # but do NOT raise a duplicate alarm record.
+        return {"suspicious": True, "alarm_id": active["id"], "new_alarm": None}
 
     # ── 2. Compute time windows ───────────────────────────────────────────────
     w7_from  = (sim_dt - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S")
@@ -186,17 +199,17 @@ def check_alarm(tx: dict) -> dict | None:
         ratio_historical=round(ratio_hist, 6),
         deviation_pct=round(deviation * 100, 1),
     )
-    if buyer_country in SUSPICIOUS_COUNTRIES:
-        _mark_suspicious(tx_id, alarm_id)
 
-    return {
-        "id":                alarm_id,
-        "alarm_key":         alarm_key,
-        "supplier_name":     supplier_name,
-        "buyer_country":     buyer_country,
-        "raised_at":         raised_at,
-        "expires_at":        expires_at,
-        "ratio_current":     round(ratio_curr * 100, 2),
-        "ratio_historical":  round(ratio_hist * 100, 2),
-        "deviation_pct":     round(deviation * 100, 1),
+    new_alarm = {
+        "id":               alarm_id,
+        "alarm_key":        alarm_key,
+        "supplier_name":    supplier_name,
+        "buyer_country":    buyer_country,
+        "raised_at":        raised_at,
+        "expires_at":       expires_at,
+        "ratio_current":    round(ratio_curr * 100, 2),
+        "ratio_historical": round(ratio_hist * 100, 2),
+        "deviation_pct":    round(deviation * 100, 1),
+        "active":           1,
     }
+    return {"suspicious": True, "alarm_id": alarm_id, "new_alarm": new_alarm}

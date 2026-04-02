@@ -2,10 +2,51 @@
 European Custom Data Hub — Real-Time Demo API
 FastAPI backend on port 8505.
 
+Message flow (publish-subscribe)
+─────────────────────────────────
+Simulation loop
+    │
+    │  publishes each transaction to broker topic "incoming"
+    ▼
+┌──────────────────────────────────┐
+│         Message Broker           │
+│  topic: "incoming"               │
+└────────────┬─────────────────────┘
+             │ fan-out to subscribers
+             ▼
+    ┌─────────────────────┐
+    │  _db_store_worker   │  ← Subscriber 1
+    │  insert_transaction │    stores the raw record in European Custom DB
+    │  publishes "stored" │    then publishes to "stored" so alarm checker
+    └────────┬────────────┘    can safely query the DB
+             │
+             ▼ topic: "stored"
+    ┌─────────────────────┐
+    │  _alarm_worker      │  ← Subscriber 2 (of "stored")
+    │  check_alarm()      │    reads VAT-ratio stats from DB
+    │  updates live queue │    updates in-memory live queue & SSE clients
+    │  publishes          │    if suspicious → publishes to "alarm_fired"
+    │  "alarm_fired"      │
+    └──────┬──────────────┘
+           │ fan-out to subscribers
+           ▼ topic: "alarm_fired"
+    ┌──────┴────────────────────────────┐
+    │                                   │
+    ▼                                   ▼
+┌──────────────────┐        ┌───────────────────────┐
+│ _db_flag_worker  │        │ _agent_worker          │
+│ Subscriber A     │        │ Subscriber B            │
+│ UPDATE tx SET    │        │ AI analysis (Claude)    │
+│ suspicious=1     │        │ verdict → DB log        │
+│ alarm_id=?       │        │ incorrect → ireland_q   │
+│ suspicion='medium'│        │ correct   → clear flag  │
+└──────────────────┘        └───────────────────────┘
+
 Endpoints
 ─────────
 GET  /health
-GET  /api/queue                     latest 30 live transactions
+GET  /api/queue                     latest 30 live transactions (REST snapshot)
+GET  /api/queue/stream              SSE stream — one transaction per event
 GET  /api/transactions              paginated historical query
 GET  /api/metrics                   VAT aggregates with filters
 GET  /api/alarms                    alarm list (active_only optional)
@@ -39,6 +80,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from lib.broker import broker
 from lib.config import DEFAULT_SPEED, MIN_SPEED, MAX_SPEED, QUEUE_SIZE
 from lib.database import (
     get_latest_transactions,
@@ -52,6 +94,7 @@ from lib.database import (
     get_suspicious_transactions,
     expire_old_alarms,
     reset_alarms,
+    flag_transaction_suspicious,
     insert_agent_log,
     get_agent_log,
     insert_ireland_queue,
@@ -65,74 +108,139 @@ from lib.catalog import SUPPLIERS, COUNTRY_NAMES
 
 # ── In-memory state ───────────────────────────────────────────────────────────
 
-_live_queue:       deque[dict] = deque(maxlen=QUEUE_SIZE)
-_live_alarms:      list[dict]  = []
-_agent_processing: dict[str, dict] = {}   # tx_id → {seller, item, started_at}
-_agent_queue:      asyncio.Queue   = None  # type: ignore — initialised in lifespan
-_sse_queues:       set[asyncio.Queue] = set()  # SSE clients
+_live_queue:       deque[dict]        = deque(maxlen=QUEUE_SIZE)
+_live_alarms:      list[dict]         = []
+_agent_processing: dict[str, dict]    = {}   # tx_id → snapshot while analysing
+_sse_queues:       set[asyncio.Queue] = set()
+_agent_sub:        asyncio.Queue | None = None  # agent worker's broker subscription
 
 
-# ── Simulation fire callback ──────────────────────────────────────────────────
+# ── Simulation fire: publish to broker ───────────────────────────────────────
 
 async def _fire_transactions(rows: list[dict]) -> None:
+    """
+    Entry point called by the simulation loop.
+    Publishes each transaction individually to the broker 'incoming' topic.
+    The 0.12 s delay between messages ensures clients receive them one by one.
+    """
+    for row in rows:
+        await broker.publish("incoming", row)
+        await asyncio.sleep(0.12)
+
+
+# ── Worker 1: DB store subscriber ─────────────────────────────────────────────
+
+async def _db_store_worker() -> None:
+    """
+    Subscribes to 'incoming'.
+    Persists the raw transaction in the European Custom DB, then publishes
+    to 'stored' so the alarm worker can safely query the DB for ratio stats.
+    """
+    q = broker.subscribe("incoming")
+    while True:
+        row = await q.get()
+        insert_transaction(row)
+        await broker.publish("stored", row)
+
+
+# ── Worker 2: Alarm checker subscriber ───────────────────────────────────────
+
+async def _alarm_worker() -> None:
+    """
+    Subscribes to 'stored' (guaranteed: transaction is in DB).
+    Runs the VAT-ratio deviation check.
+    Updates in-memory live queue and SSE clients for every transaction.
+    When a transaction is flagged, publishes to 'alarm_fired'.
+    """
     from lib.alarm_checker import check_alarm
 
-    for row in rows:
-        insert_transaction(row)
+    q = broker.subscribe("stored")
+    while True:
+        row = await q.get()
 
-        alarm = check_alarm(row)
-        if alarm:
-            _live_alarms.insert(0, alarm)
+        result = check_alarm(row)          # None or {"suspicious", "alarm_id", "new_alarm"}
 
-        row["suspicious"] = 0
-        if any(a["alarm_key"] == f"{row['seller_id']}|{row['buyer_country']}"
-               for a in _live_alarms):
-            row["suspicious"] = 1
+        suspicious = bool(result and result.get("suspicious"))
+        new_alarm  = result.get("new_alarm") if result else None
+        alarm_id   = result.get("alarm_id")  if result else None
 
+        if new_alarm:
+            _live_alarms.insert(0, new_alarm)
+
+        row["suspicious"] = 1 if suspicious else 0
         _live_queue.appendleft(row)
 
-        # Push to SSE clients — one transaction at a time
+        # Push to all connected SSE clients
         if _sse_queues:
             payload = _json.dumps(row)
             dead = set()
-            for q in _sse_queues:
+            for sse_q in _sse_queues:
                 try:
-                    q.put_nowait(payload)
+                    sse_q.put_nowait(payload)
                 except asyncio.QueueFull:
-                    dead.add(q)
+                    dead.add(sse_q)
             _sse_queues.difference_update(dead)
 
-        if row.get("suspicious") and _agent_queue is not None:
-            alarm_context = next(
+        if suspicious:
+            # Determine alarm context for the agent (from new or existing alarm)
+            alarm_ctx = new_alarm or next(
                 (a for a in _live_alarms
-                 if a["alarm_key"] == f"{row['seller_id']}|{row['buyer_country']}"),
+                 if a.get("id") == alarm_id),
                 {},
             )
-            _agent_queue.put_nowait({"tx": row, "alarm": alarm_context})
+            await broker.publish("alarm_fired", {
+                "tx":       row,
+                "alarm_id": alarm_id,
+                "alarm":    alarm_ctx,
+            })
 
-        # Small delay so each transaction arrives individually on the client
-        await asyncio.sleep(0.12)
-
-    if rows:
-        expire_old_alarms(rows[-1]["transaction_date"][:19])
+        expire_old_alarms(row["transaction_date"][:19])
 
 
-# ── Agent worker ──────────────────────────────────────────────────────────────
+# ── Worker 3: DB flag subscriber ──────────────────────────────────────────────
+
+async def _db_flag_worker() -> None:
+    """
+    Subscribes to 'alarm_fired'.
+    Updates the stored transaction record using its identifier:
+    sets suspicious=1, links the alarm, and sets suspicion_level='medium'.
+    This is the pub/sub DB update step — the alarm process never touches
+    the transaction row directly.
+    """
+    q = broker.subscribe("alarm_fired")
+    while True:
+        item = await q.get()
+        flag_transaction_suspicious(
+            item["tx"]["transaction_id"],
+            item["alarm_id"],
+        )
+
+
+# ── Worker 4: Agent AI subscriber ─────────────────────────────────────────────
 
 async def _agent_worker() -> None:
+    """
+    Subscribes to 'alarm_fired'.
+    Runs the Claude-powered VAT compliance analysis in a thread pool.
+    On verdict:
+      - 'incorrect' → escalates suspicion_level to 'high', inserts into ireland_queue
+      - 'correct' / 'uncertain' → clears the suspicious flag
+    """
     import concurrent.futures
     from lib.agent_bridge import analyse_transaction_sync
+
+    global _agent_sub
+    _agent_sub = broker.subscribe("alarm_fired")
 
     loop = asyncio.get_event_loop()
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
     while True:
-        item  = await _agent_queue.get()
+        item  = await _agent_sub.get()
         tx    = item["tx"]
         alarm = item["alarm"]
         tx_id = tx["transaction_id"]
 
-        # Mark as in-progress for the /api/agent-processing endpoint
         _agent_processing[tx_id] = {
             "transaction_id":   tx_id,
             "seller_name":      tx["seller_name"],
@@ -196,22 +304,28 @@ async def _agent_worker() -> None:
             print(f"[agent_worker] error: {exc}\n{traceback.format_exc()}")
         finally:
             _agent_processing.pop(tx_id, None)
-            _agent_queue.task_done()
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _agent_queue
     from lib.database import init_european_custom_db, init_simulation_db
     init_european_custom_db()
     init_simulation_db()
-    _agent_queue = asyncio.Queue()
-    sim_task   = asyncio.create_task(simulation_loop(_fire_transactions))
-    agent_task = asyncio.create_task(_agent_worker())
+
+    sim_task      = asyncio.create_task(simulation_loop(_fire_transactions))
+    db_store_task = asyncio.create_task(_db_store_worker())
+    alarm_task    = asyncio.create_task(_alarm_worker())
+    db_flag_task  = asyncio.create_task(_db_flag_worker())
+    agent_task    = asyncio.create_task(_agent_worker())
+
     yield
+
     sim_task.cancel()
+    db_store_task.cancel()
+    alarm_task.cancel()
+    db_flag_task.cancel()
     agent_task.cancel()
 
 
@@ -219,7 +333,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="European Custom Data Hub — RTDemo",
-    version="2.1.0",
+    version="3.0.0",
     lifespan=lifespan,
 )
 
@@ -269,10 +383,7 @@ async def queue_stream(request: Request):
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
@@ -366,9 +477,9 @@ def sim_status():
     counts = get_sim_counts()
     s = state.to_dict()
     s.update(counts)
-    s["active_alarms"]       = len(get_alarms(active_only=True))
-    s["agent_queue_len"]     = _agent_queue.qsize() if _agent_queue else 0
-    s["agent_processing"]    = len(_agent_processing)
+    s["active_alarms"]    = len(get_alarms(active_only=True))
+    s["agent_queue_len"]  = _agent_sub.qsize() if _agent_sub else 0
+    s["agent_processing"] = len(_agent_processing)
     return s
 
 
@@ -411,10 +522,9 @@ def sim_reset():
     _live_queue.clear()
     _live_alarms.clear()
     _agent_processing.clear()
-    # Notify SSE clients to clear their local queue
-    for q in list(_sse_queues):
+    for sse_q in list(_sse_queues):
         try:
-            q.put_nowait("__reset__")
+            sse_q.put_nowait("__reset__")
         except asyncio.QueueFull:
             pass
     return {"ok": True, "status": state.to_dict()}
