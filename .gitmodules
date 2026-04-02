@@ -1,0 +1,3 @@
+[submodule "vat_fraud_detection"]
+	path = vat_fraud_detection
+	url = https://github.com/jcvdschrieck/vat-fraud-detection.git

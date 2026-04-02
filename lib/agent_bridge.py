@@ -14,8 +14,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Absolute path to the vat_fraud_detection project root
-_VFD_DIR = Path(__file__).parent.parent.parent / "vat_fraud_detection"
+# Path to the vat_fraud_detection git submodule (lives inside this project)
+_VFD_DIR = Path(__file__).parent.parent / "vat_fraud_detection"
 _SCRIPT  = _VFD_DIR / "_analyse_tx.py"
 
 
