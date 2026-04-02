@@ -1,0 +1,1099 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VAT Investigation Queue — Ireland Revenue Commissioners</title>
+  <style>
+    /* ── Reset & base ─────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: "GDS Transport", Arial, sans-serif;
+      font-size: 16px;
+      color: #0b0c0c;
+      background: #f3f2f1;
+    }
+
+    /* ── Top gov.ie strip ─────────────────────────────────────────────────── */
+    .govie-strip {
+      background: #004d2e;
+      height: 28px;
+      display: flex;
+      align-items: center;
+      padding: 0 24px;
+    }
+    .govie-strip-logo {
+      color: #ffffff;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      text-decoration: none;
+    }
+    .govie-strip-logo .harp {
+      font-size: 15px;
+      opacity: 0.9;
+    }
+    .govie-strip-right {
+      margin-left: auto;
+      color: #d4e8df;
+      font-size: 11px;
+    }
+
+    /* ── Main Revenue header ──────────────────────────────────────────────── */
+    .revenue-header {
+      background: #00613a;
+      padding: 14px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .revenue-header-left {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .revenue-logo-badge {
+      background: #ffffff;
+      color: #00613a;
+      font-weight: 900;
+      font-size: 18px;
+      padding: 4px 10px;
+      border-radius: 2px;
+      letter-spacing: 0.5px;
+      line-height: 1.2;
+    }
+    .revenue-logo-text {
+      color: #ffffff;
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: -0.3px;
+    }
+    .revenue-logo-sub {
+      color: #a8d5bf;
+      font-size: 11px;
+      margin-top: 1px;
+    }
+    .revenue-header-right {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+    }
+    .revenue-header-link {
+      color: #d4e8df;
+      font-size: 13px;
+      text-decoration: none;
+      border-bottom: 1px solid transparent;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .revenue-header-link:hover {
+      color: #ffffff;
+      border-bottom-color: #ffffff;
+    }
+    .revenue-header-divider {
+      color: #4d9e75;
+      font-size: 13px;
+    }
+
+    /* ── Navigation bar ───────────────────────────────────────────────────── */
+    .revenue-nav {
+      background: #003d25;
+      padding: 0 24px;
+      display: flex;
+      align-items: stretch;
+    }
+    .revenue-nav a {
+      color: #c9e4d6;
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 600;
+      padding: 10px 18px;
+      display: block;
+      border-bottom: 3px solid transparent;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .revenue-nav a:hover {
+      color: #ffffff;
+      background: rgba(255,255,255,0.05);
+    }
+    .revenue-nav a.active {
+      color: #ffffff;
+      border-bottom-color: #f47738;
+    }
+
+    /* ── Page wrapper ─────────────────────────────────────────────────────── */
+    .page-wrap {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 28px 24px 60px;
+    }
+
+    /* ── Page title ───────────────────────────────────────────────────────── */
+    .page-title-row {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      margin-bottom: 24px;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .page-title-block h1 {
+      font-size: 26px;
+      font-weight: 700;
+      color: #0b0c0c;
+      line-height: 1.2;
+    }
+    .page-title-block .subtitle {
+      font-size: 14px;
+      color: #505a5f;
+      margin-top: 4px;
+    }
+    .refresh-status {
+      font-size: 12px;
+      color: #505a5f;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .refresh-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #00613a;
+      display: inline-block;
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+
+    /* ── KPI tiles ────────────────────────────────────────────────────────── */
+    .kpi-row {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      margin-bottom: 28px;
+    }
+    .kpi-tile {
+      background: #ffffff;
+      border: 1px solid #b1b4b6;
+      border-left: 4px solid #00613a;
+      border-radius: 3px;
+      padding: 18px 20px;
+    }
+    .kpi-tile.kpi-high {
+      border-left-color: #f47738;
+    }
+    .kpi-tile.kpi-pending {
+      border-left-color: #1d70b8;
+    }
+    .kpi-tile.kpi-confirmed {
+      border-left-color: #00613a;
+    }
+    .kpi-label {
+      font-size: 13px;
+      color: #505a5f;
+      font-weight: 400;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      margin-bottom: 8px;
+    }
+    .kpi-value {
+      font-size: 32px;
+      font-weight: 700;
+      color: #0b0c0c;
+      line-height: 1;
+    }
+    .kpi-sub {
+      font-size: 12px;
+      color: #505a5f;
+      margin-top: 6px;
+    }
+
+    /* ── Table card ───────────────────────────────────────────────────────── */
+    .table-card {
+      background: #ffffff;
+      border: 1px solid #b1b4b6;
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .table-card-header {
+      padding: 14px 20px;
+      border-bottom: 2px solid #00613a;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .table-card-title {
+      font-size: 16px;
+      font-weight: 700;
+      color: #0b0c0c;
+    }
+    .table-card-count {
+      font-size: 13px;
+      color: #505a5f;
+    }
+
+    /* ── Table ────────────────────────────────────────────────────────────── */
+    .queue-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13.5px;
+    }
+    .queue-table thead th {
+      background: #f3f2f1;
+      color: #0b0c0c;
+      font-weight: 700;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      padding: 10px 14px;
+      text-align: left;
+      border-bottom: 1px solid #b1b4b6;
+      white-space: nowrap;
+    }
+    .queue-table tbody tr {
+      border-bottom: 1px solid #e8e8e8;
+      transition: background 0.1s;
+    }
+    .queue-table tbody tr:hover {
+      background: #f8faf9;
+    }
+    .queue-table tbody tr.row-expanded {
+      background: #f0f7f3;
+    }
+    .queue-table td {
+      padding: 10px 14px;
+      vertical-align: middle;
+      color: #0b0c0c;
+    }
+
+    /* ── Case ref ─────────────────────────────────────────────────────────── */
+    .case-ref {
+      font-family: "Courier New", monospace;
+      font-size: 12px;
+      font-weight: 700;
+      color: #00613a;
+      background: #e8f5ee;
+      padding: 2px 7px;
+      border-radius: 2px;
+      white-space: nowrap;
+    }
+
+    /* ── Suspicion badge ──────────────────────────────────────────────────── */
+    .badge {
+      display: inline-block;
+      padding: 3px 9px;
+      border-radius: 2px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      white-space: nowrap;
+    }
+    .badge-high {
+      background: #f47738;
+      color: #ffffff;
+    }
+    .badge-medium {
+      background: #ffdd00;
+      color: #0b0c0c;
+    }
+    .badge-low {
+      background: #d4e8df;
+      color: #00613a;
+    }
+    .badge-incorrect {
+      background: #d4351c;
+      color: #ffffff;
+    }
+    .badge-uncertain {
+      background: #ffdd00;
+      color: #0b0c0c;
+    }
+    .badge-correct {
+      background: #00703c;
+      color: #ffffff;
+    }
+
+    /* ── VAT exposure ─────────────────────────────────────────────────────── */
+    .vat-exposure-positive {
+      color: #d4351c;
+      font-weight: 700;
+    }
+    .vat-exposure-zero {
+      color: #505a5f;
+    }
+
+    /* ── Action button ────────────────────────────────────────────────────── */
+    .btn-view {
+      background: #00613a;
+      color: #ffffff;
+      border: none;
+      padding: 6px 14px;
+      font-size: 12px;
+      font-weight: 600;
+      border-radius: 2px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.15s;
+      font-family: "GDS Transport", Arial, sans-serif;
+    }
+    .btn-view:hover {
+      background: #004d2e;
+    }
+    .btn-view.active {
+      background: #004d2e;
+      outline: 2px solid #f47738;
+    }
+
+    /* ── Empty state ──────────────────────────────────────────────────────── */
+    .empty-state {
+      padding: 48px 24px;
+      text-align: center;
+      color: #505a5f;
+    }
+    .empty-state .icon {
+      font-size: 40px;
+      margin-bottom: 12px;
+      opacity: 0.4;
+    }
+    .empty-state p {
+      font-size: 15px;
+    }
+
+    /* ── Right-side detail drawer ─────────────────────────────────────────── */
+    .drawer-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.35);
+      z-index: 900;
+    }
+    .drawer-overlay.open {
+      display: block;
+    }
+    .detail-drawer {
+      position: fixed;
+      top: 0;
+      right: -440px;
+      width: 440px;
+      height: 100%;
+      background: #ffffff;
+      box-shadow: -4px 0 24px rgba(0,0,0,0.18);
+      z-index: 1000;
+      overflow-y: auto;
+      transition: right 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+      display: flex;
+      flex-direction: column;
+    }
+    .detail-drawer.open {
+      right: 0;
+    }
+
+    /* ── Drawer header ────────────────────────────────────────────────────── */
+    .drawer-header {
+      background: #00613a;
+      color: #ffffff;
+      padding: 16px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+    .drawer-header-title {
+      font-size: 15px;
+      font-weight: 700;
+    }
+    .drawer-header-sub {
+      font-size: 11px;
+      color: #a8d5bf;
+      margin-top: 2px;
+    }
+    .drawer-close {
+      background: none;
+      border: none;
+      color: #ffffff;
+      font-size: 22px;
+      cursor: pointer;
+      line-height: 1;
+      padding: 4px 6px;
+      border-radius: 2px;
+      transition: background 0.15s;
+      font-family: Arial, sans-serif;
+    }
+    .drawer-close:hover {
+      background: rgba(255,255,255,0.15);
+    }
+
+    /* ── Drawer body ──────────────────────────────────────────────────────── */
+    .drawer-body {
+      padding: 20px;
+      flex: 1;
+    }
+
+    /* ── Drawer sections ──────────────────────────────────────────────────── */
+    .drawer-section {
+      margin-bottom: 22px;
+      border: 1px solid #e8e8e8;
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .drawer-section-title {
+      background: #f3f2f1;
+      border-bottom: 2px solid #00613a;
+      padding: 9px 14px;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #0b0c0c;
+    }
+    .drawer-section-body {
+      padding: 14px;
+    }
+
+    /* ── Data rows in drawer ──────────────────────────────────────────────── */
+    .data-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      padding: 5px 0;
+      border-bottom: 1px solid #f3f2f1;
+      gap: 12px;
+    }
+    .data-row:last-child {
+      border-bottom: none;
+    }
+    .data-key {
+      font-size: 12px;
+      color: #505a5f;
+      flex: 0 0 140px;
+      font-weight: 600;
+    }
+    .data-val {
+      font-size: 13px;
+      color: #0b0c0c;
+      text-align: right;
+      word-break: break-word;
+    }
+
+    /* ── Verdict block ────────────────────────────────────────────────────── */
+    .verdict-block {
+      text-align: center;
+      padding: 14px 0 10px;
+    }
+    .verdict-badge-large {
+      display: inline-block;
+      padding: 8px 24px;
+      border-radius: 3px;
+      font-size: 16px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 10px;
+    }
+    .reasoning-text {
+      font-size: 13px;
+      color: #0b0c0c;
+      line-height: 1.6;
+      background: #f3f2f1;
+      border-left: 3px solid #00613a;
+      padding: 10px 12px;
+      border-radius: 0 2px 2px 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    /* ── Legislation list ─────────────────────────────────────────────────── */
+    .legislation-list {
+      list-style: none;
+    }
+    .legislation-item {
+      padding: 8px 0;
+      border-bottom: 1px solid #f3f2f1;
+      font-size: 13px;
+    }
+    .legislation-item:last-child {
+      border-bottom: none;
+    }
+    .legislation-source {
+      font-weight: 700;
+      color: #00613a;
+      font-size: 12px;
+      margin-bottom: 2px;
+    }
+    .legislation-section {
+      color: #1d70b8;
+      font-size: 12px;
+      margin-bottom: 3px;
+    }
+    .legislation-excerpt {
+      color: #505a5f;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .no-legislation {
+      color: #505a5f;
+      font-size: 13px;
+      font-style: italic;
+    }
+
+    /* ── Drawer loading ───────────────────────────────────────────────────── */
+    .drawer-loading {
+      padding: 40px 20px;
+      text-align: center;
+      color: #505a5f;
+    }
+    .spinner {
+      width: 32px;
+      height: 32px;
+      border: 3px solid #d4e8df;
+      border-top-color: #00613a;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      margin: 0 auto 14px;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    /* ── Footer ───────────────────────────────────────────────────────────── */
+    .page-footer {
+      border-top: 4px solid #00613a;
+      background: #003d25;
+      color: #a8d5bf;
+      font-size: 12px;
+      padding: 20px 24px;
+      margin-top: 48px;
+    }
+    .page-footer a { color: #a8d5bf; }
+
+    /* ── Loading row ──────────────────────────────────────────────────────── */
+    .loading-row td {
+      padding: 32px 14px;
+      text-align: center;
+      color: #505a5f;
+    }
+
+    /* ── Responsive ───────────────────────────────────────────────────────── */
+    @media (max-width: 900px) {
+      .kpi-row { grid-template-columns: repeat(2, 1fr); }
+      .detail-drawer { width: 100%; right: -100%; }
+      .queue-table { font-size: 12px; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ── gov.ie top strip ─────────────────────────────────────────────────── -->
+  <div class="govie-strip">
+    <a class="govie-strip-logo" href="#">
+      <span class="harp">&#9812;</span>
+      gov.ie
+    </a>
+    <div class="govie-strip-right">An Rialtais — Official Irish Government Portal</div>
+  </div>
+
+  <!-- ── Main Revenue header ──────────────────────────────────────────────── -->
+  <header class="revenue-header">
+    <div class="revenue-header-left">
+      <div class="revenue-logo-badge">R</div>
+      <div>
+        <div class="revenue-logo-text">Revenue</div>
+        <div class="revenue-logo-sub">Na Coimisinéirí Ioncaim — The Revenue Commissioners</div>
+      </div>
+    </div>
+    <div class="revenue-header-right">
+      <a href="#" class="revenue-header-link">myAccount</a>
+      <span class="revenue-header-divider">|</span>
+      <a href="#" class="revenue-header-link">Gaeilge</a>
+      <span class="revenue-header-divider">|</span>
+      <a href="#" class="revenue-header-link">English</a>
+    </div>
+  </header>
+
+  <!-- ── Navigation bar ───────────────────────────────────────────────────── -->
+  <nav class="revenue-nav">
+    <a href="#" class="active">Investigation Queue</a>
+    <a href="#">Alarm Evidence</a>
+    <a href="#">Case Management</a>
+    <a href="#">Reports</a>
+    <a href="#">Help</a>
+  </nav>
+
+  <!-- ── Page content ─────────────────────────────────────────────────────── -->
+  <main class="page-wrap">
+
+    <!-- Page title -->
+    <div class="page-title-row">
+      <div class="page-title-block">
+        <h1>VAT Investigation Queue</h1>
+        <div class="subtitle">Ireland Revenue Commissioners &mdash; Automated VAT Compliance Monitoring System</div>
+      </div>
+      <div class="refresh-status">
+        <span class="refresh-dot"></span>
+        <span id="refresh-label">Auto-refresh every 8s</span>
+        &nbsp;|&nbsp; Last updated: <span id="last-updated">—</span>
+      </div>
+    </div>
+
+    <!-- KPI tiles -->
+    <div class="kpi-row">
+      <div class="kpi-tile">
+        <div class="kpi-label">Total Cases</div>
+        <div class="kpi-value" id="kpi-total">—</div>
+        <div class="kpi-sub">All forwarded cases</div>
+      </div>
+      <div class="kpi-tile kpi-high">
+        <div class="kpi-label">HIGH Suspicion</div>
+        <div class="kpi-value" id="kpi-high">—</div>
+        <div class="kpi-sub">Agent verdict: incorrect</div>
+      </div>
+      <div class="kpi-tile kpi-pending">
+        <div class="kpi-label">Total VAT Exposure</div>
+        <div class="kpi-value" id="kpi-exposure">—</div>
+        <div class="kpi-sub">Estimated underpayment (€)</div>
+      </div>
+      <div class="kpi-tile kpi-confirmed">
+        <div class="kpi-label">Countries Involved</div>
+        <div class="kpi-value" id="kpi-countries">—</div>
+        <div class="kpi-sub">Unique seller origins</div>
+      </div>
+    </div>
+
+    <!-- Queue table -->
+    <div class="table-card">
+      <div class="table-card-header">
+        <div class="table-card-title">Investigation Case Queue</div>
+        <div class="table-card-count" id="table-count">Loading&hellip;</div>
+      </div>
+      <div style="overflow-x: auto;">
+        <table class="queue-table">
+          <thead>
+            <tr>
+              <th>Case Ref</th>
+              <th>Date</th>
+              <th>Supplier</th>
+              <th>From</th>
+              <th>Item</th>
+              <th>Applied VAT</th>
+              <th>Correct VAT</th>
+              <th>VAT Exposure</th>
+              <th>Suspicion</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="queue-tbody">
+            <tr class="loading-row">
+              <td colspan="10">
+                <div class="spinner" style="margin-bottom:8px;"></div>
+                Loading investigation queue&hellip;
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- ── Footer ───────────────────────────────────────────────────────────── -->
+  <footer class="page-footer">
+    <strong style="color:#d4e8df;">Revenue Commissioners Ireland</strong> &mdash;
+    Automated VAT Compliance System &mdash; Internal Use Only
+    &nbsp;|&nbsp; <a href="#">Privacy Statement</a>
+    &nbsp;|&nbsp; <a href="#">Accessibility</a>
+    &nbsp;|&nbsp; &copy; 2026 Revenue Commissioners
+  </footer>
+
+  <!-- ── Detail drawer overlay ────────────────────────────────────────────── -->
+  <div class="drawer-overlay" id="drawer-overlay" onclick="closeDrawer()"></div>
+
+  <!-- ── Detail drawer ────────────────────────────────────────────────────── -->
+  <aside class="detail-drawer" id="detail-drawer" aria-label="Case detail panel">
+    <div class="drawer-header">
+      <div>
+        <div class="drawer-header-title" id="drawer-title">Case Detail</div>
+        <div class="drawer-header-sub" id="drawer-subtitle">&nbsp;</div>
+      </div>
+      <button class="drawer-close" onclick="closeDrawer()" title="Close">&times;</button>
+    </div>
+    <div class="drawer-body" id="drawer-body">
+      <div class="drawer-loading">
+        <div class="spinner"></div>
+        Loading case detail&hellip;
+      </div>
+    </div>
+  </aside>
+
+  <!-- ── JavaScript ───────────────────────────────────────────────────────── -->
+  <script>
+    'use strict';
+
+    // ── State ────────────────────────────────────────────────────────────────
+    let _currentCaseId = null;
+    let _allRows = [];
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    function caseRef(transactionId) {
+      if (!transactionId) return '—';
+      const raw = transactionId.replace(/-/g, '').toUpperCase();
+      return 'IE-' + raw.slice(-8);
+    }
+
+    function fmtDate(dateStr) {
+      if (!dateStr) return '—';
+      try {
+        const d = new Date(dateStr);
+        return d.toLocaleDateString('en-IE', { day: '2-digit', month: 'short', year: 'numeric' });
+      } catch { return dateStr.slice(0, 10); }
+    }
+
+    function fmtPct(val) {
+      if (val == null) return '—';
+      return (val * 100).toFixed(1) + '%';
+    }
+
+    function fmtEur(val) {
+      if (val == null || isNaN(val)) return '—';
+      return '€' + Number(val).toLocaleString('en-IE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+
+    function vatExposure(row) {
+      const diff = (row.correct_vat_rate || 0) - (row.vat_rate || 0);
+      return diff * (row.value || 0);
+    }
+
+    function suspicionBadge(level) {
+      const l = (level || '').toLowerCase();
+      if (l === 'high')   return '<span class="badge badge-high">HIGH</span>';
+      if (l === 'medium') return '<span class="badge badge-medium">MEDIUM</span>';
+      return '<span class="badge badge-low">LOW</span>';
+    }
+
+    function verdictBadge(verdict, large) {
+      const v = (verdict || '').toLowerCase();
+      const cls = large ? 'verdict-badge-large' : 'badge';
+      if (v === 'incorrect') return `<span class="${cls} badge-incorrect">INCORRECT</span>`;
+      if (v === 'correct')   return `<span class="${cls} badge-correct">CORRECT</span>`;
+      return `<span class="${cls} badge-uncertain">UNCERTAIN</span>`;
+    }
+
+    function escHtml(str) {
+      if (!str) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function nowStr() {
+      return new Date().toLocaleTimeString('en-IE', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+
+    // ── Load queue ───────────────────────────────────────────────────────────
+
+    async function loadQueue() {
+      try {
+        const res = await fetch('/api/ireland-queue?limit=200');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        const rows = Array.isArray(data) ? data : (data.items || data);
+        _allRows = rows;
+        renderQueue(rows);
+        updateKPIs(rows);
+        document.getElementById('last-updated').textContent = nowStr();
+      } catch (err) {
+        console.error('loadQueue error:', err);
+        document.getElementById('table-count').textContent = 'Error loading data';
+      }
+    }
+
+    function renderQueue(rows) {
+      const tbody = document.getElementById('queue-tbody');
+      const countEl = document.getElementById('table-count');
+
+      if (!rows || rows.length === 0) {
+        tbody.innerHTML = `
+          <tr>
+            <td colspan="10">
+              <div class="empty-state">
+                <div class="icon">&#128269;</div>
+                <p>No cases in the investigation queue yet.</p>
+                <p style="font-size:13px; margin-top:6px; color:#505a5f;">
+                  Cases will appear here when the AI agent flags transactions as requiring review.
+                </p>
+              </div>
+            </td>
+          </tr>`;
+        countEl.textContent = '0 cases';
+        return;
+      }
+
+      countEl.textContent = rows.length + (rows.length === 1 ? ' case' : ' cases');
+
+      const html = rows.map((row, idx) => {
+        const exposure  = vatExposure(row);
+        const expClass  = exposure > 0 ? 'vat-exposure-positive' : 'vat-exposure-zero';
+        const expStr    = exposure > 0 ? fmtEur(exposure) : fmtEur(0);
+        const isActive  = _currentCaseId === row.transaction_id;
+        const btnClass  = isActive ? 'btn-view active' : 'btn-view';
+        const rowClass  = isActive ? 'row-expanded' : '';
+
+        return `<tr class="${rowClass}" id="row-${escHtml(row.transaction_id)}">
+          <td><span class="case-ref">${escHtml(caseRef(row.transaction_id))}</span></td>
+          <td style="white-space:nowrap;">${escHtml(fmtDate(row.transaction_date))}</td>
+          <td style="max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
+              title="${escHtml(row.seller_name)}">${escHtml(row.seller_name || '—')}</td>
+          <td><span style="font-size:11px; font-weight:700; color:#505a5f;">${escHtml(row.seller_country || '—')}</span></td>
+          <td style="max-width:140px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
+              title="${escHtml(row.item_description)}">${escHtml(row.item_description || '—')}</td>
+          <td style="text-align:right; white-space:nowrap;">${fmtPct(row.vat_rate)}</td>
+          <td style="text-align:right; white-space:nowrap; color:#00613a; font-weight:600;">${fmtPct(row.correct_vat_rate)}</td>
+          <td style="text-align:right; white-space:nowrap;" class="${expClass}">${expStr}</td>
+          <td>${suspicionBadge('high')}</td>
+          <td>
+            <button class="${btnClass}" onclick="loadCase('${escHtml(row.transaction_id)}')">
+              View Details
+            </button>
+          </td>
+        </tr>`;
+      }).join('');
+
+      tbody.innerHTML = html;
+    }
+
+    function updateKPIs(rows) {
+      document.getElementById('kpi-total').textContent = rows.length;
+
+      const highCount = rows.filter(r => (r.agent_verdict || '').toLowerCase() === 'incorrect').length;
+      document.getElementById('kpi-high').textContent = highCount;
+
+      const totalExposure = rows.reduce((sum, r) => sum + vatExposure(r), 0);
+      document.getElementById('kpi-exposure').textContent =
+        '€' + Number(totalExposure).toLocaleString('en-IE', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+
+      const countries = new Set(rows.map(r => r.seller_country).filter(Boolean));
+      document.getElementById('kpi-countries').textContent = countries.size;
+    }
+
+    // ── Load case detail ─────────────────────────────────────────────────────
+
+    async function loadCase(transactionId) {
+      // If same case clicked again, close
+      if (_currentCaseId === transactionId) {
+        closeDrawer();
+        return;
+      }
+
+      _currentCaseId = transactionId;
+
+      // Re-render to highlight active row
+      renderQueue(_allRows);
+
+      // Update drawer header
+      document.getElementById('drawer-title').textContent = 'Case ' + caseRef(transactionId);
+      document.getElementById('drawer-subtitle').textContent = transactionId;
+
+      // Show loading state
+      document.getElementById('drawer-body').innerHTML = `
+        <div class="drawer-loading">
+          <div class="spinner"></div>
+          Loading case detail&hellip;
+        </div>`;
+
+      openDrawer();
+
+      try {
+        const res = await fetch(`/api/ireland-case/${encodeURIComponent(transactionId)}`);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const c = await res.json();
+        renderCaseDetail(c);
+      } catch (err) {
+        document.getElementById('drawer-body').innerHTML = `
+          <div class="drawer-loading">
+            <p style="color:#d4351c; font-weight:600;">Failed to load case detail.</p>
+            <p style="font-size:13px; margin-top:8px;">${escHtml(String(err))}</p>
+            <p style="font-size:12px; margin-top:12px; color:#505a5f;">
+              Ensure the <code>/api/ireland-case/{id}</code> endpoint is available.
+            </p>
+          </div>`;
+      }
+    }
+
+    function renderCaseDetail(c) {
+      const exposure = ((c.correct_vat_rate || 0) - (c.vat_rate || 0)) * (c.value || 0);
+      const expClass = exposure > 0 ? 'vat-exposure-positive' : 'vat-exposure-zero';
+
+      // Section 1 — Case Overview
+      const s1 = `
+        <div class="drawer-section">
+          <div class="drawer-section-title">1 &mdash; Case Overview</div>
+          <div class="drawer-section-body">
+            <div class="data-row">
+              <span class="data-key">Transaction ID</span>
+              <span class="data-val" style="font-family:monospace; font-size:11px;">${escHtml(c.transaction_id || '—')}</span>
+            </div>
+            <div class="data-row">
+              <span class="data-key">Seller Name</span>
+              <span class="data-val">${escHtml(c.seller_name || '—')}</span>
+            </div>
+            <div class="data-row">
+              <span class="data-key">Seller Country</span>
+              <span class="data-val">${escHtml(c.seller_country || '—')}</span>
+            </div>
+            <div class="data-row">
+              <span class="data-key">Buyer Country</span>
+              <span class="data-val">${escHtml(c.buyer_country || 'IE')}</span>
+            </div>
+            <div class="data-row">
+              <span class="data-key">Transaction Date</span>
+              <span class="data-val">${escHtml(fmtDate(c.transaction_date))}</span>
+            </div>
+            <div class="data-row">
+              <span class="data-key">Queued At</span>
+              <span class="data-val" style="font-size:11px;">${escHtml(c.queued_at ? new Date(c.queued_at).toLocaleString('en-IE') : '—')}</span>
+            </div>
+          </div>
+        </div>`;
+
+      // Section 2 — Transaction Details
+      const s2 = `
+        <div class="drawer-section">
+          <div class="drawer-section-title">2 &mdash; Transaction Details</div>
+          <div class="drawer-section-body">
+            <div class="data-row">
+              <span class="data-key">Item Description</span>
+              <span class="data-val">${escHtml(c.item_description || '—')}</span>
+            </div>
+            <div class="data-row">
+              <span class="data-key">Category</span>
+              <span class="data-val">${escHtml(c.item_category || '—')}</span>
+            </div>
+            <div class="data-row">
+              <span class="data-key">Transaction Value</span>
+              <span class="data-val" style="font-weight:700;">${fmtEur(c.value)}</span>
+            </div>
+            <div class="data-row">
+              <span class="data-key">VAT Rate Applied</span>
+              <span class="data-val" style="color:#d4351c; font-weight:600;">${fmtPct(c.vat_rate)}</span>
+            </div>
+            <div class="data-row">
+              <span class="data-key">Correct VAT Rate</span>
+              <span class="data-val" style="color:#00613a; font-weight:600;">${fmtPct(c.correct_vat_rate)}</span>
+            </div>
+            <div class="data-row">
+              <span class="data-key">VAT Amount Paid</span>
+              <span class="data-val">${fmtEur(c.vat_amount)}</span>
+            </div>
+            <div class="data-row">
+              <span class="data-key">VAT Exposure</span>
+              <span class="data-val ${expClass}" style="font-weight:700; font-size:15px;">${fmtEur(exposure)}</span>
+            </div>
+          </div>
+        </div>`;
+
+      // Section 3 — Alarm Evidence
+      const s3 = `
+        <div class="drawer-section">
+          <div class="drawer-section-title">3 &mdash; Alarm Evidence</div>
+          <div class="drawer-section-body">
+            <div class="data-row">
+              <span class="data-key">Alarm Key</span>
+              <span class="data-val" style="font-family:monospace; font-size:11px;">${escHtml(c.alarm_key || '—')}</span>
+            </div>
+            <div class="data-row">
+              <span class="data-key">Deviation</span>
+              <span class="data-val" style="color:#d4351c; font-weight:700;">
+                ${c.deviation_pct != null ? (Number(c.deviation_pct) >= 0 ? '+' : '') + Number(c.deviation_pct).toFixed(1) + '%' : '—'}
+              </span>
+            </div>
+            <div class="data-row">
+              <span class="data-key">Current Ratio</span>
+              <span class="data-val">${c.ratio_current != null ? Number(c.ratio_current).toFixed(4) : '—'}</span>
+            </div>
+            <div class="data-row">
+              <span class="data-key">Historical Ratio</span>
+              <span class="data-val">${c.ratio_historical != null ? Number(c.ratio_historical).toFixed(4) : '—'}</span>
+            </div>
+          </div>
+        </div>`;
+
+      // Section 4 — AI Agent Analysis
+      const verdict = c.agent_verdict || '';
+      const reasoning = c.agent_reasoning || 'No reasoning provided.';
+      const s4 = `
+        <div class="drawer-section">
+          <div class="drawer-section-title">4 &mdash; AI Agent Analysis</div>
+          <div class="drawer-section-body">
+            <div class="verdict-block">
+              ${verdictBadge(verdict, true)}
+            </div>
+            <div class="reasoning-text">${escHtml(reasoning)}</div>
+          </div>
+        </div>`;
+
+      // Section 5 — Legislation References
+      let s5body = '';
+      const refs = c.legislation_refs;
+      if (!refs || (Array.isArray(refs) && refs.length === 0)) {
+        s5body = `<p class="no-legislation">No legislation references recorded.</p>`;
+      } else {
+        const refsArr = Array.isArray(refs) ? refs : [refs];
+        s5body = `<ul class="legislation-list">` +
+          refsArr.map(ref => `
+            <li class="legislation-item">
+              <div class="legislation-source">${escHtml(ref.source || ref.title || 'Unknown source')}</div>
+              ${ref.section ? `<div class="legislation-section">${escHtml(ref.section)}</div>` : ''}
+              ${ref.paragraph || ref.excerpt
+                ? `<div class="legislation-excerpt">${escHtml(ref.paragraph || ref.excerpt)}</div>`
+                : ''}
+            </li>`).join('') +
+          `</ul>`;
+      }
+      const s5 = `
+        <div class="drawer-section">
+          <div class="drawer-section-title">5 &mdash; Legislation References</div>
+          <div class="drawer-section-body">${s5body}</div>
+        </div>`;
+
+      document.getElementById('drawer-body').innerHTML = s1 + s2 + s3 + s4 + s5;
+    }
+
+    // ── Drawer open/close ────────────────────────────────────────────────────
+
+    function openDrawer() {
+      document.getElementById('detail-drawer').classList.add('open');
+      document.getElementById('drawer-overlay').classList.add('open');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeDrawer() {
+      document.getElementById('detail-drawer').classList.remove('open');
+      document.getElementById('drawer-overlay').classList.remove('open');
+      document.body.style.overflow = '';
+      const prev = _currentCaseId;
+      _currentCaseId = null;
+      if (prev) renderQueue(_allRows);
+    }
+
+    // Close on Escape key
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closeDrawer();
+    });
+
+    // ── Bootstrap ────────────────────────────────────────────────────────────
+
+    loadQueue();
+    setInterval(loadQueue, 8000);
+
+  </script>
+</body>
+</html>

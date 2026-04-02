@@ -4,7 +4,6 @@ import MainPage           from './pages/MainPage'
 import Dashboard          from './pages/Dashboard'
 import SuspiciousPage     from './pages/SuspiciousPage'
 import ProcessingLogPage  from './pages/ProcessingLogPage'
-import IrelandPage        from './pages/IrelandPage'
 
 export default function App() {
   return (
@@ -15,7 +14,6 @@ export default function App() {
           <Route path="/dashboard"    element={<Dashboard />} />
           <Route path="/suspicious"   element={<SuspiciousPage />} />
           <Route path="/agent-log"    element={<ProcessingLogPage />} />
-          <Route path="/ireland"      element={<IrelandPage />} />
           <Route path="*"             element={<Navigate to="/" replace />} />
         </Routes>
       </EclLayout>

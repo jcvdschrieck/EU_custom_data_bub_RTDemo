@@ -54,9 +54,12 @@ export default function EclLayout({ children }) {
         <NavLink to="/agent-log"  className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
           Agent Log
         </NavLink>
-        <NavLink to="/ireland"    className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
-          🇮🇪 Ireland Queue
-        </NavLink>
+        <a href="http://localhost:8505/ireland-app/"
+           target="_blank" rel="noreferrer"
+           className="nav-link"
+           style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+          🇮🇪 Ireland Queue ↗
+        </a>
       </nav>
 
       {/* Page content */}

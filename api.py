@@ -5,31 +5,38 @@ FastAPI backend on port 8505.
 Endpoints
 ─────────
 GET  /health
-GET  /api/queue                 latest 30 live transactions (real-time feed)
-GET  /api/transactions          paginated historical query
-GET  /api/metrics               VAT aggregates with filters
-GET  /api/alarms                alarm list (active_only optional)
-GET  /api/suspicious            last 50 suspicious transactions
-GET  /api/agent-log             agent processing history
-GET  /api/ireland-queue         transactions forwarded to Ireland investigation
+GET  /api/queue                     latest 30 live transactions
+GET  /api/transactions              paginated historical query
+GET  /api/metrics                   VAT aggregates with filters
+GET  /api/alarms                    alarm list (active_only optional)
+GET  /api/suspicious                last 50 suspicious transactions
+GET  /api/agent-log                 agent processing history (with legislation_refs)
+GET  /api/agent-processing          currently-processing transactions (in-memory)
+GET  /api/ireland-queue             transactions forwarded to Ireland investigation
+GET  /api/ireland-case/{tx_id}      full case detail (queue + agent log merged)
 GET  /api/simulation/status
 POST /api/simulation/start
 POST /api/simulation/pause
 POST /api/simulation/resume
-POST /api/simulation/speed      body: {"speed": <float>}
+POST /api/simulation/speed          body: {"speed": <float>}
 POST /api/simulation/reset
 GET  /api/catalog/suppliers
 GET  /api/catalog/countries
+Static: /ireland-app/               standalone Irish Revenue investigation app
 """
 from __future__ import annotations
 
 import asyncio
+import json as _json
 from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from lib.config import DEFAULT_SPEED, MIN_SPEED, MAX_SPEED, QUEUE_SIZE
@@ -49,47 +56,41 @@ from lib.database import (
     get_agent_log,
     insert_ireland_queue,
     get_ireland_queue,
+    get_ireland_case,
     update_suspicion_level,
     clear_suspicious_flag,
 )
 from lib.simulator import state, simulation_loop
 from lib.catalog import SUPPLIERS, COUNTRY_NAMES
 
-# ── Live queue (in-memory ring buffer) ────────────────────────────────────────
+# ── In-memory state ───────────────────────────────────────────────────────────
 
-_live_queue:  deque[dict] = deque(maxlen=QUEUE_SIZE)
-_live_alarms: list[dict]  = []     # active alarms raised this session
+_live_queue:       deque[dict] = deque(maxlen=QUEUE_SIZE)
+_live_alarms:      list[dict]  = []
+_agent_processing: dict[str, dict] = {}   # tx_id → {seller, item, started_at}
+_agent_queue:      asyncio.Queue   = None  # type: ignore — initialised in lifespan
 
-# ── Agent processing queue ────────────────────────────────────────────────────
 
-_agent_queue: asyncio.Queue = None   # type: ignore  # initialised in lifespan
-
+# ── Simulation fire callback ──────────────────────────────────────────────────
 
 async def _fire_transactions(rows: list[dict]) -> None:
-    """Called by the simulation loop for each batch of due transactions."""
     from lib.alarm_checker import check_alarm
 
     for row in rows:
         insert_transaction(row)
 
-        # Run alarm check after DB write
         alarm = check_alarm(row)
         if alarm:
             _live_alarms.insert(0, alarm)
 
-        # Refresh suspicious flag on the in-memory row for the live queue
         row["suspicious"] = 0
-        if any(
-            a["alarm_key"] == f"{row['seller_id']}|{row['buyer_country']}"
-            for a in _live_alarms
-        ):
+        if any(a["alarm_key"] == f"{row['seller_id']}|{row['buyer_country']}"
+               for a in _live_alarms):
             row["suspicious"] = 1
 
         _live_queue.appendleft(row)
 
-        # If suspicious, enqueue for agent processing (non-blocking)
         if row.get("suspicious") and _agent_queue is not None:
-            # Attach alarm context so agent worker can build ireland_queue entry
             alarm_context = next(
                 (a for a in _live_alarms
                  if a["alarm_key"] == f"{row['seller_id']}|{row['buyer_country']}"),
@@ -97,13 +98,13 @@ async def _fire_transactions(rows: list[dict]) -> None:
             )
             _agent_queue.put_nowait({"tx": row, "alarm": alarm_context})
 
-    # Expire stale alarms
     if rows:
         expire_old_alarms(rows[-1]["transaction_date"][:19])
 
 
+# ── Agent worker ──────────────────────────────────────────────────────────────
+
 async def _agent_worker() -> None:
-    """Background coroutine: picks suspicious transactions from the queue and analyses them."""
     import concurrent.futures
     from lib.agent_bridge import analyse_transaction_sync
 
@@ -111,23 +112,32 @@ async def _agent_worker() -> None:
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
     while True:
-        item = await _agent_queue.get()
+        item  = await _agent_queue.get()
         tx    = item["tx"]
         alarm = item["alarm"]
-        try:
-            result = await loop.run_in_executor(
-                executor,
-                analyse_transaction_sync,
-                tx,
-            )
-            verdict   = result.get("verdict", "uncertain")
-            reasoning = result.get("reasoning", "")
-            now_str   = datetime.now(timezone.utc).isoformat()
+        tx_id = tx["transaction_id"]
 
-            sent_to_ireland = 1 if verdict == "incorrect" else 0
+        # Mark as in-progress for the /api/agent-processing endpoint
+        _agent_processing[tx_id] = {
+            "transaction_id":   tx_id,
+            "seller_name":      tx["seller_name"],
+            "item_description": tx["item_description"],
+            "value":            tx["value"],
+            "vat_rate":         tx["vat_rate"],
+            "started_at":       datetime.now(timezone.utc).isoformat(),
+        }
+
+        try:
+            result = await loop.run_in_executor(executor, analyse_transaction_sync, tx)
+
+            verdict          = result.get("verdict", "uncertain")
+            reasoning        = result.get("reasoning", "")
+            legislation_refs = result.get("legislation_refs", [])
+            now_str          = datetime.now(timezone.utc).isoformat()
+            sent_to_ireland  = 1 if verdict == "incorrect" else 0
 
             insert_agent_log({
-                "transaction_id":   tx["transaction_id"],
+                "transaction_id":   tx_id,
                 "seller_name":      tx["seller_name"],
                 "buyer_country":    tx["buyer_country"],
                 "item_description": tx["item_description"],
@@ -137,15 +147,15 @@ async def _agent_worker() -> None:
                 "correct_vat_rate": tx["correct_vat_rate"],
                 "verdict":          verdict,
                 "reasoning":        reasoning,
+                "legislation_refs": _json.dumps(legislation_refs),
                 "sent_to_ireland":  sent_to_ireland,
                 "processed_at":     now_str,
             })
 
             if verdict == "incorrect":
-                # Upgrade suspicion level to high
-                update_suspicion_level(tx["transaction_id"], "high")
+                update_suspicion_level(tx_id, "high")
                 insert_ireland_queue({
-                    "transaction_id":   tx["transaction_id"],
+                    "transaction_id":   tx_id,
                     "seller_name":      tx["seller_name"],
                     "seller_country":   tx["seller_country"],
                     "item_description": tx["item_description"],
@@ -164,14 +174,13 @@ async def _agent_worker() -> None:
                     "queued_at":        now_str,
                 })
             else:
-                # Agent cleared the transaction — remove suspicious flag
-                clear_suspicious_flag(tx["transaction_id"])
+                clear_suspicious_flag(tx_id)
 
         except Exception as exc:
-            # Never let worker crash
             import traceback
             print(f"[agent_worker] error: {exc}\n{traceback.format_exc()}")
         finally:
+            _agent_processing.pop(tx_id, None)
             _agent_queue.task_done()
 
 
@@ -184,8 +193,8 @@ async def lifespan(app: FastAPI):
     init_european_custom_db()
     init_simulation_db()
     _agent_queue = asyncio.Queue()
-    sim_task    = asyncio.create_task(simulation_loop(_fire_transactions))
-    agent_task  = asyncio.create_task(_agent_worker())
+    sim_task   = asyncio.create_task(simulation_loop(_fire_transactions))
+    agent_task = asyncio.create_task(_agent_worker())
     yield
     sim_task.cancel()
     agent_task.cancel()
@@ -195,7 +204,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="European Custom Data Hub — RTDemo",
-    version="2.0.0",
+    version="2.1.0",
     lifespan=lifespan,
 )
 
@@ -278,16 +287,32 @@ def api_get_suspicious(limit: int = Query(50, ge=1, le=200)):
     return get_suspicious_transactions(limit=limit)
 
 
-# ── Agent log & Ireland queue ─────────────────────────────────────────────────
+# ── Agent log & processing ────────────────────────────────────────────────────
 
 @app.get("/api/agent-log")
 def api_agent_log(limit: int = Query(100, ge=1, le=500)):
     return get_agent_log(limit=limit)
 
 
+@app.get("/api/agent-processing")
+def api_agent_processing():
+    """In-memory snapshot of transactions currently being analysed."""
+    return list(_agent_processing.values())
+
+
+# ── Ireland queue & case detail ───────────────────────────────────────────────
+
 @app.get("/api/ireland-queue")
 def api_ireland_queue(limit: int = Query(100, ge=1, le=500)):
     return get_ireland_queue(limit=limit)
+
+
+@app.get("/api/ireland-case/{transaction_id}")
+def api_ireland_case(transaction_id: str):
+    case = get_ireland_case(transaction_id)
+    if not case:
+        return JSONResponse(status_code=404, content={"detail": "Case not found"})
+    return case
 
 
 # ── Simulation control ────────────────────────────────────────────────────────
@@ -297,8 +322,9 @@ def sim_status():
     counts = get_sim_counts()
     s = state.to_dict()
     s.update(counts)
-    s["active_alarms"]  = len([a for a in get_alarms(active_only=True)])
-    s["agent_queue_len"] = _agent_queue.qsize() if _agent_queue else 0
+    s["active_alarms"]       = len(get_alarms(active_only=True))
+    s["agent_queue_len"]     = _agent_queue.qsize() if _agent_queue else 0
+    s["agent_processing"]    = len(_agent_processing)
     return s
 
 
@@ -340,6 +366,7 @@ def sim_reset():
     reset_alarms()
     _live_queue.clear()
     _live_alarms.clear()
+    _agent_processing.clear()
     return {"ok": True, "status": state.to_dict()}
 
 
@@ -354,3 +381,11 @@ def catalog_suppliers():
 @app.get("/api/catalog/countries")
 def catalog_countries():
     return [{"code": k, "name": v} for k, v in COUNTRY_NAMES.items()]
+
+
+# ── Ireland app static files (must be last) ───────────────────────────────────
+
+_ireland_app_dir = Path(__file__).parent / "ireland_app"
+if _ireland_app_dir.exists():
+    app.mount("/ireland-app", StaticFiles(directory=str(_ireland_app_dir), html=True),
+              name="ireland_app")

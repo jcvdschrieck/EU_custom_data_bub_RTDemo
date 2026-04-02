@@ -64,19 +64,20 @@ CREATE INDEX IF NOT EXISTS idx_alarm_expires ON alarms(expires_at);
 
 _AGENT_LOG_DDL = """
 CREATE TABLE IF NOT EXISTS agent_log (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    transaction_id   TEXT    NOT NULL,
-    seller_name      TEXT    NOT NULL,
-    buyer_country    TEXT    NOT NULL,
-    item_description TEXT    NOT NULL,
-    item_category    TEXT    NOT NULL,
-    value            REAL    NOT NULL,
-    vat_rate         REAL    NOT NULL,
-    correct_vat_rate REAL    NOT NULL,
-    verdict          TEXT    NOT NULL,
-    reasoning        TEXT    NOT NULL,
-    sent_to_ireland  INTEGER NOT NULL DEFAULT 0,
-    processed_at     TEXT    NOT NULL
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    transaction_id    TEXT    NOT NULL,
+    seller_name       TEXT    NOT NULL,
+    buyer_country     TEXT    NOT NULL,
+    item_description  TEXT    NOT NULL,
+    item_category     TEXT    NOT NULL,
+    value             REAL    NOT NULL,
+    vat_rate          REAL    NOT NULL,
+    correct_vat_rate  REAL    NOT NULL,
+    verdict           TEXT    NOT NULL,
+    reasoning         TEXT    NOT NULL,
+    legislation_refs  TEXT,
+    sent_to_ireland   INTEGER NOT NULL DEFAULT 0,
+    processed_at      TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_agent_log_tx ON agent_log(transaction_id);
 """
@@ -439,11 +440,11 @@ def insert_agent_log(entry: dict) -> None:
             INSERT OR IGNORE INTO agent_log
             (transaction_id, seller_name, buyer_country, item_description,
              item_category, value, vat_rate, correct_vat_rate,
-             verdict, reasoning, sent_to_ireland, processed_at)
+             verdict, reasoning, legislation_refs, sent_to_ireland, processed_at)
             VALUES
             (:transaction_id, :seller_name, :buyer_country, :item_description,
              :item_category, :value, :vat_rate, :correct_vat_rate,
-             :verdict, :reasoning, :sent_to_ireland, :processed_at)
+             :verdict, :reasoning, :legislation_refs, :sent_to_ireland, :processed_at)
             """,
             entry,
         )
@@ -451,12 +452,39 @@ def insert_agent_log(entry: dict) -> None:
 
 
 def get_agent_log(limit: int = 100) -> list[dict]:
+    import json as _json
     conn = _connect(EUROPEAN_CUSTOM_DB)
     rows = conn.execute(
         "SELECT * FROM agent_log ORDER BY id DESC LIMIT ?", (limit,)
     ).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    result = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["legislation_refs"] = _json.loads(d["legislation_refs"]) if d.get("legislation_refs") else []
+        except Exception:
+            d["legislation_refs"] = []
+        result.append(d)
+    return result
+
+
+def get_agent_log_by_tx(transaction_id: str) -> dict | None:
+    import json as _json
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    row = conn.execute(
+        "SELECT * FROM agent_log WHERE transaction_id=? ORDER BY id DESC LIMIT 1",
+        (transaction_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    d = dict(row)
+    try:
+        d["legislation_refs"] = _json.loads(d["legislation_refs"]) if d.get("legislation_refs") else []
+    except Exception:
+        d["legislation_refs"] = []
+    return d
 
 
 def update_suspicion_level(transaction_id: str, level: str) -> None:
@@ -511,3 +539,30 @@ def get_ireland_queue(limit: int = 100) -> list[dict]:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def get_ireland_case(transaction_id: str) -> dict | None:
+    """Return ireland_queue entry merged with agent_log detail (legislation refs)."""
+    import json as _json
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    iq = conn.execute(
+        "SELECT * FROM ireland_queue WHERE transaction_id=? LIMIT 1",
+        (transaction_id,),
+    ).fetchone()
+    al = conn.execute(
+        "SELECT * FROM agent_log WHERE transaction_id=? ORDER BY id DESC LIMIT 1",
+        (transaction_id,),
+    ).fetchone()
+    conn.close()
+    if not iq:
+        return None
+    result = dict(iq)
+    if al:
+        try:
+            result["legislation_refs"] = _json.loads(al["legislation_refs"]) if al["legislation_refs"] else []
+        except Exception:
+            result["legislation_refs"] = []
+        result["agent_reasoning_full"] = al["reasoning"]
+    else:
+        result["legislation_refs"] = []
+    return result

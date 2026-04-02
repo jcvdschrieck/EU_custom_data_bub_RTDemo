@@ -14,11 +14,13 @@ const PERIODS = [
   { label: 'Custom',       days: -1 },
 ]
 
-function toDateStr(daysAgo) {
+// Uses simulation time as "today" so period selectors are relative to the
+// simulated date, not the browser's real date.  Falls back to real date.
+function toDateStr(daysAgo, simTime) {
   if (daysAgo == null) return null
-  const d = new Date()
-  d.setDate(d.getDate() - daysAgo)
-  return d.toISOString().slice(0, 10)
+  const base = simTime ? new Date(simTime) : new Date()
+  base.setDate(base.getDate() - daysAgo)
+  return base.toISOString().slice(0, 10)
 }
 
 function fmt(n, dec = 0) {
@@ -202,13 +204,23 @@ export default function MainPage() {
   const [metrics, setMetrics]       = useState(null)
   const [metricsLoading, setML]     = useState(false)
   const [queue, setQueue]           = useState([])
+  const [simTime, setSimTime]       = useState(null)        // current simulation date
   const prevIds = useRef(new Set())
+
+  // Poll simulation time so period selectors are relative to the sim clock
+  useEffect(() => {
+    const fetch = () => axios.get('/api/simulation/status')
+      .then(r => setSimTime(r.data.sim_time)).catch(() => {})
+    fetch()
+    const id = setInterval(fetch, 5000)
+    return () => clearInterval(id)
+  }, [])
 
   const isCustom = PERIODS[periodIdx].days === -1
 
   const dateFrom = isCustom
     ? (customFrom || null)
-    : toDateStr(PERIODS[periodIdx].days)
+    : toDateStr(PERIODS[periodIdx].days, simTime)
 
   const dateTo = isCustom ? (customTo || null) : null
 

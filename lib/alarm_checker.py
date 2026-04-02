@@ -131,6 +131,10 @@ def check_alarm(tx: dict) -> dict | None:
     tx_id         = tx["transaction_id"]
     alarm_key     = f"{supplier_id}|{buyer_country}"
 
+    # Only raise alarms / mark suspicious for SUSPICIOUS_COUNTRIES
+    if buyer_country not in SUSPICIOUS_COUNTRIES:
+        return None
+
     # Parse simulation time
     sim_dt = datetime.fromisoformat(tx_date[:19]).replace(tzinfo=timezone.utc)
 
