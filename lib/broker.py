@@ -62,5 +62,16 @@ class MessageBroker:
         return sum(q.qsize() for q in self._queues[topic])
 
 
-# Singleton used by api.py and workers
+# ── Topic name constants ──────────────────────────────────────────────────────
+
+SALES_ORDER_EVENT  = "sales_order_event"   # simulation → all risk factories + order validation
+RT_RISK_1_OUTCOME  = "rt_risk_1_outcome"   # VAT-ratio factory → consolidation
+RT_RISK_2_OUTCOME  = "rt_risk_2_outcome"   # watchlist factory  → consolidation
+RT_SCORE           = "rt_score"            # consolidation → release factory
+ORDER_VALIDATION   = "order_validation"    # order validation   → release factory
+RELEASE_EVENT      = "release_event"       # release factory    → db store worker
+
+
+# ── Singleton used across api.py and workers ─────────────────────────────────
+
 broker = MessageBroker()

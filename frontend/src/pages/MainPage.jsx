@@ -83,11 +83,16 @@ function TxTable({ items, prevIds }) {
             <th style={{textAlign:'right'}}>VAT rate</th>
             <th style={{textAlign:'right'}}>VAT due (€)</th>
             <th>Status</th>
+            <th style={{textAlign:'center'}}>Risk</th>
           </tr>
         </thead>
         <tbody>
           {items.map(r => {
             const isNew = !prevIds.current.has(r.transaction_id)
+            const risk  = r.risk_score || (r.suspicious ? 'amber' : 'green')
+            const riskStyle = risk === 'red'   ? { bg:'#fde8e8', color:'#c0392b', label:'● RED' }
+                            : risk === 'amber' ? { bg:'#fff3cd', color:'#856404', label:'● AMB' }
+                            :                   { bg:'#d4edda', color:'#155724', label:'● OK'  }
             return (
               <tr key={r.transaction_id} className={isNew ? 'new-row' : ''}>
                 <td>{r.transaction_date?.slice(0, 16).replace('T', ' ')}</td>
@@ -103,6 +108,13 @@ function TxTable({ items, prevIds }) {
                   {r.has_error
                     ? <span className="badge err" title={`Correct rate: ${(r.correct_vat_rate*100).toFixed(1)}%`}>⚠ Error</span>
                     : <span className="badge ok">✓ OK</span>}
+                </td>
+                <td style={{ textAlign: 'center' }}>
+                  <span style={{
+                    background: riskStyle.bg, color: riskStyle.color,
+                    padding: '2px 7px', borderRadius: 10,
+                    fontSize: 10, fontWeight: 700,
+                  }}>{riskStyle.label}</span>
                 </td>
               </tr>
             )

@@ -222,6 +222,16 @@ def get_latest_transactions(limit: int = 30) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_transaction_by_id(transaction_id: str) -> dict | None:
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    row = conn.execute(
+        "SELECT * FROM transactions WHERE transaction_id=? LIMIT 1",
+        (transaction_id,),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 def get_transaction_count() -> int:
     conn = _connect(EUROPEAN_CUSTOM_DB)
     n = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
@@ -487,19 +497,24 @@ def get_agent_log_by_tx(transaction_id: str) -> dict | None:
     return d
 
 
-def flag_transaction_suspicious(transaction_id: str, alarm_id: int) -> None:
+def flag_transaction_suspicious(
+    transaction_id: str,
+    alarm_id: int | None,
+    risk_score: str = "amber",
+) -> None:
     """
-    DB-subscriber action triggered by the 'alarm_fired' broker topic.
+    DB-subscriber action triggered by the Release_Event_Broker.
     Updates the stored transaction record using its identifier — sets
-    suspicious=1, links the alarm, and marks suspicion_level as 'medium'.
+    suspicious=1, links the alarm (if any), and stores the computed
+    risk_score ('amber' or 'red') as suspicion_level.
     """
     conn = _connect(EUROPEAN_CUSTOM_DB)
     with conn:
         conn.execute(
             "UPDATE transactions "
-            "SET suspicious=1, alarm_id=?, suspicion_level='medium' "
+            "SET suspicious=1, alarm_id=?, suspicion_level=? "
             "WHERE transaction_id=?",
-            (alarm_id, transaction_id),
+            (alarm_id, risk_score, transaction_id),
         )
     conn.close()
 

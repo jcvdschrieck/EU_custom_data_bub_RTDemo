@@ -1,41 +1,62 @@
 """
-European Custom Data Hub — Real-Time Demo API
+European Custom Data Hub — Real-Time Demo API  (v4.0)
 FastAPI backend on port 8505.
 
 Message flow (publish-subscribe)
-─────────────────────────────────
-Simulation loop
-    │
-    │  publishes each transaction to broker topic "incoming"
-    ▼
-┌──────────────────────────────────────────────────────┐
-│                   Message Broker                     │
-│  topic: "incoming"                                   │
-└────────────┬──────────────────────┬──────────────────┘
-             │ Subscriber 1         │ Subscriber 2
-             ▼                      ▼
-    ┌─────────────────┐    ┌──────────────────────┐
-    │ _db_store_worker│    │ _alarm_worker         │
-    │ insert_          │    │ check_alarm()         │
-    │ transaction()   │    │ (current tx injected  │
-    │                 │    │  into ratio — no DB   │
-    │                 │    │  dependency on store) │
-    └─────────────────┘    │ updates live queue    │
-                           │ publishes "alarm_fired"│
-                           └──────────┬────────────┘
-                                      │ fan-out
-                           ▼ topic: "alarm_fired"
-                  ┌─────────────────────────────────┐
-                  │                                 │
-                  ▼                                 ▼
-       ┌──────────────────┐          ┌─────────────────────┐
-       │ _db_flag_worker  │          │ _agent_worker        │
-       │ Subscriber A     │          │ Subscriber B         │
-       │ UPDATE tx SET    │          │ AI analysis (Claude) │
-       │ suspicious=1     │          │ verdict → DB log     │
-       │ alarm_id=?       │          │ incorrect→ireland_q  │
-       │ level='medium'   │          │ correct →clear flag  │
-       └──────────────────┘          └─────────────────────┘
+─────────────────────────────────────────────────────────────────────────────
+
+ Simulation loop
+     │  publishes each raw transaction (120 ms inter-message delay)
+     ▼
+ ┌────────────────────────────────────────────────────────────────────────┐
+ │  Sales-order Event Broker  (topic: sales_order_event)                 │
+ └───────────┬──────────────────────┬──────────────────────┬─────────────┘
+             │                      │                      │
+             ▼                      ▼                      ▼
+ ┌────────────────────┐  ┌────────────────────┐  ┌──────────────────────┐
+ │ _RT_risk_          │  │ _RT_risk_          │  │ _order_validation_   │
+ │ monitoring_1_      │  │ monitoring_2_      │  │ factory              │
+ │ factory            │  │ factory            │  │                      │
+ │ (VAT ratio check)  │  │ (watchlist check)  │  │ validates fields     │
+ └────────┬───────────┘  └────────┬───────────┘  └──────────┬───────────┘
+          │                       │                          │
+          ▼                       ▼                          │
+ RT_risk_1_outcome_broker  RT_risk_2_outcome_broker          │
+          │                       │                          │
+          └──────────┬────────────┘                          │
+                     ▼                                       │
+          ┌──────────────────────┐                           │
+          │ _RT_consolidation_   │                           │
+          │ factory              │                           │
+          │ green / amber / red  │                           │
+          └──────────┬───────────┘                           │
+                     │                                       │
+                     ▼                                       ▼
+                 RT_score_broker            Order_validation_broker
+                     │                                       │
+                     └──────────────┬────────────────────────┘
+                                    ▼
+                          ┌──────────────────────┐
+                          │  _release_factory    │
+                          │  combines score +    │
+                          │  validation          │
+                          └──────────┬───────────┘
+                                     │
+                                     ▼
+                          Release_Event_Broker  (topic: release_event)
+                                     │
+                                     ▼
+                          ┌──────────────────────┐
+                          │  _db_store_worker    │
+                          │  INSERT + flag       │
+                          │  live queue + SSE    │
+                          └──────────────────────┘
+
+ AI Agent — triggered manually from the dashboard
+ ─────────────────────────────────────────────────
+ POST /api/agent/analyse/{transaction_id}  →  _agent_worker  →  verdict
+   • incorrect → suspicion_level='high', insert ireland_queue
+   • correct/uncertain → clear suspicious flag
 
 Endpoints
 ─────────
@@ -46,10 +67,11 @@ GET  /api/transactions              paginated historical query
 GET  /api/metrics                   VAT aggregates with filters
 GET  /api/alarms                    alarm list (active_only optional)
 GET  /api/suspicious                last 50 suspicious transactions
-GET  /api/agent-log                 agent processing history (with legislation_refs)
-GET  /api/agent-processing          currently-processing transactions (in-memory)
-GET  /api/ireland-queue             transactions forwarded to Ireland investigation
-GET  /api/ireland-case/{tx_id}      full case detail (queue + agent log merged)
+GET  /api/agent-log                 agent analysis history (with legislation_refs)
+GET  /api/agent-processing          transactions currently being analysed
+POST /api/agent/analyse/{tx_id}     trigger AI agent from dashboard
+GET  /api/ireland-queue             cases forwarded to Ireland investigation
+GET  /api/ireland-case/{tx_id}      full case detail
 GET  /api/simulation/status
 POST /api/simulation/start
 POST /api/simulation/pause
@@ -75,11 +97,16 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from lib.broker import broker
+from lib.broker import (
+    broker,
+    SALES_ORDER_EVENT, RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME,
+    RT_SCORE, ORDER_VALIDATION, RELEASE_EVENT,
+)
 from lib.config import DEFAULT_SPEED, MIN_SPEED, MAX_SPEED, QUEUE_SIZE
 from lib.database import (
     get_latest_transactions,
     get_transaction_count,
+    get_transaction_by_id,
     get_vat_metrics,
     insert_transaction,
     query_transactions,
@@ -107,66 +134,255 @@ _live_queue:       deque[dict]        = deque(maxlen=QUEUE_SIZE)
 _live_alarms:      list[dict]         = []
 _agent_processing: dict[str, dict]    = {}   # tx_id → snapshot while analysing
 _sse_queues:       set[asyncio.Queue] = set()
-_agent_sub:        asyncio.Queue | None = None  # agent worker's broker subscription
+_agent_queue:      asyncio.Queue | None = None  # populated by POST /api/agent/analyse
 
 
-# ── Simulation fire: publish to broker ───────────────────────────────────────
+# ── Simulation: publish to Sales-order Event Broker ──────────────────────────
 
 async def _fire_transactions(rows: list[dict]) -> None:
     """
     Entry point called by the simulation loop.
-    Publishes each transaction individually to the broker 'incoming' topic.
-    The 0.12 s delay between messages ensures clients receive them one by one.
+    Publishes each transaction individually to the Sales-order Event Broker.
+    The 120 ms delay ensures clients receive messages one by one via SSE.
     """
     for row in rows:
-        await broker.publish("incoming", row)
+        await broker.publish(SALES_ORDER_EVENT, row)
         await asyncio.sleep(0.12)
 
 
-# ── Worker 1: DB store subscriber ─────────────────────────────────────────────
+# ── RT Risk Monitoring 1 Factory (VAT ratio deviation) ───────────────────────
 
-async def _db_store_worker() -> None:
+async def _RT_risk_monitoring_1_factory() -> None:
     """
-    Subscribes to 'incoming'.
-    Persists the raw transaction in the European Custom DB.
-    Peer subscriber alongside _alarm_worker — no ordering dependency.
-    """
-    q = broker.subscribe("incoming")
-    while True:
-        row = await q.get()
-        insert_transaction(row)
-
-
-# ── Worker 2: Alarm checker subscriber ───────────────────────────────────────
-
-async def _alarm_worker() -> None:
-    """
-    Subscribes to 'incoming' as a peer of _db_store_worker.
-    The current transaction's value/vat are injected directly into the
-    ratio calculation (see alarm_checker._vat_ratio extra_* params) so
-    there is no dependency on the row being committed to the DB first.
-    Updates in-memory live queue and SSE clients for every transaction.
-    When a transaction is flagged, publishes to 'alarm_fired'.
+    Subscriber of Sales-order Event Broker.
+    Runs the VAT/value ratio deviation check (7-day vs 8-week baseline).
+    Publishes outcome to RT_risk_monitoring_1_outcome_broker.
     """
     from lib.alarm_checker import check_alarm
 
-    q = broker.subscribe("incoming")
+    q = broker.subscribe(SALES_ORDER_EVENT)
     while True:
-        row = await q.get()
+        tx = await q.get()
 
-        result = check_alarm(row)          # None or {"suspicious", "alarm_id", "new_alarm"}
+        result = check_alarm(tx)   # None | {"suspicious", "alarm_id", "new_alarm"}
 
-        suspicious = bool(result and result.get("suspicious"))
-        new_alarm  = result.get("new_alarm") if result else None
-        alarm_id   = result.get("alarm_id")  if result else None
+        flagged   = bool(result and result.get("suspicious"))
+        alarm_id  = result.get("alarm_id")  if result else None
+        new_alarm = result.get("new_alarm") if result else None
 
         if new_alarm:
             _live_alarms.insert(0, new_alarm)
 
-        row["suspicious"] = 1 if suspicious else 0
+        expire_old_alarms(tx["transaction_date"][:19])
+
+        await broker.publish(RT_RISK_1_OUTCOME, {
+            "tx":       tx,
+            "flagged":  flagged,
+            "alarm_id": alarm_id,
+            "alarm":    new_alarm or next(
+                (a for a in _live_alarms if a.get("id") == alarm_id), {}
+            ) if flagged else None,
+        })
+
+
+# ── RT Risk Monitoring 2 Factory (watchlist check) ───────────────────────────
+
+async def _RT_risk_monitoring_2_factory() -> None:
+    """
+    Subscriber of Sales-order Event Broker.
+    Checks whether the (seller_id, buyer_country) pair appears in the
+    configured watchlist (lib/watchlist.py).
+    Publishes outcome to RT_risk_monitoring_2_outcome_broker.
+    """
+    from lib.watchlist import is_watchlisted
+
+    q = broker.subscribe(SALES_ORDER_EVENT)
+    while True:
+        tx = await q.get()
+
+        flagged = is_watchlisted(tx["seller_id"], tx["buyer_country"])
+
+        await broker.publish(RT_RISK_2_OUTCOME, {
+            "tx":      tx,
+            "flagged": flagged,
+            "reason":  "watchlist_match" if flagged else "clear",
+        })
+
+
+# ── RT Consolidation Factory ──────────────────────────────────────────────────
+
+async def _RT_consolidation_factory() -> None:
+    """
+    Subscribes to RT_risk_monitoring_1_outcome_broker AND
+    RT_risk_monitoring_2_outcome_broker.
+    Correlates both outcomes by transaction_id and computes a risk score:
+      • both flagged  → RED
+      • one flagged   → AMBER
+      • neither       → GREEN
+    Publishes to RT_score_broker.
+    """
+    _buffer: dict[str, dict] = {}   # tx_id → {"r1": ..., "r2": ...}
+
+    async def _emit_if_ready(tx_id: str) -> None:
+        entry = _buffer.get(tx_id, {})
+        if "r1" not in entry or "r2" not in entry:
+            return
+        del _buffer[tx_id]
+
+        r1, r2   = entry["r1"], entry["r2"]
+        flag_1   = r1["flagged"]
+        flag_2   = r2["flagged"]
+
+        if flag_1 and flag_2:
+            risk_score = "red"
+        elif flag_1 or flag_2:
+            risk_score = "amber"
+        else:
+            risk_score = "green"
+
+        await broker.publish(RT_SCORE, {
+            "tx":             r1["tx"],
+            "risk_score":     risk_score,
+            "risk_1_flagged": flag_1,
+            "risk_2_flagged": flag_2,
+            "alarm_id":       r1.get("alarm_id"),
+            "alarm":          r1.get("alarm"),
+        })
+
+    async def _drain_r1() -> None:
+        q = broker.subscribe(RT_RISK_1_OUTCOME)
+        while True:
+            item = await q.get()
+            tx_id = item["tx"]["transaction_id"]
+            _buffer.setdefault(tx_id, {})["r1"] = item
+            await _emit_if_ready(tx_id)
+
+    async def _drain_r2() -> None:
+        q = broker.subscribe(RT_RISK_2_OUTCOME)
+        while True:
+            item = await q.get()
+            tx_id = item["tx"]["transaction_id"]
+            _buffer.setdefault(tx_id, {})["r2"] = item
+            await _emit_if_ready(tx_id)
+
+    await asyncio.gather(_drain_r1(), _drain_r2())
+
+
+# ── Order Validation Factory ──────────────────────────────────────────────────
+
+async def _order_validation_factory() -> None:
+    """
+    Subscriber of Sales-order Event Broker.
+    Validates the incoming sales order (required fields, numeric sanity,
+    known country code).  Produces a copy of the sales order enriched
+    with a validation_flag and any validation_errors.
+    Publishes to Order_validation_broker.
+    """
+    from lib.catalog import COUNTRIES
+
+    q = broker.subscribe(SALES_ORDER_EVENT)
+    while True:
+        tx = await q.get()
+
+        errors: list[str] = []
+
+        for field in ("transaction_id", "seller_id", "seller_name",
+                      "buyer_country", "value", "vat_rate", "vat_amount"):
+            if tx.get(field) is None:
+                errors.append(f"missing field: {field}")
+
+        if tx.get("value", 0) <= 0:
+            errors.append("value must be positive")
+        if tx.get("vat_rate", -1) < 0:
+            errors.append("vat_rate must be >= 0")
+        if tx.get("buyer_country") not in COUNTRIES:
+            errors.append(f"unknown buyer_country: {tx.get('buyer_country')}")
+
+        await broker.publish(ORDER_VALIDATION, {
+            "tx":               tx,
+            "validated":        len(errors) == 0,
+            "validation_errors": errors,
+        })
+
+
+# ── Release Factory ───────────────────────────────────────────────────────────
+
+async def _release_factory() -> None:
+    """
+    Subscribes to Order_validation_broker AND RT_score_broker.
+    Correlates both by transaction_id, combines the payloads, and
+    publishes the enriched release message to Release_Event_Broker.
+    """
+    _buffer: dict[str, dict] = {}
+
+    async def _emit_if_ready(tx_id: str) -> None:
+        entry = _buffer.get(tx_id, {})
+        if "validation" not in entry or "score" not in entry:
+            return
+        del _buffer[tx_id]
+
+        val   = entry["validation"]
+        score = entry["score"]
+
+        await broker.publish(RELEASE_EVENT, {
+            "tx":               val["tx"],
+            "validated":        val["validated"],
+            "validation_errors": val["validation_errors"],
+            "risk_score":       score["risk_score"],
+            "risk_1_flagged":   score["risk_1_flagged"],
+            "risk_2_flagged":   score["risk_2_flagged"],
+            "alarm_id":         score["alarm_id"],
+            "alarm":            score["alarm"],
+        })
+
+    async def _drain_validation() -> None:
+        q = broker.subscribe(ORDER_VALIDATION)
+        while True:
+            item = await q.get()
+            tx_id = item["tx"]["transaction_id"]
+            _buffer.setdefault(tx_id, {})["validation"] = item
+            await _emit_if_ready(tx_id)
+
+    async def _drain_score() -> None:
+        q = broker.subscribe(RT_SCORE)
+        while True:
+            item = await q.get()
+            tx_id = item["tx"]["transaction_id"]
+            _buffer.setdefault(tx_id, {})["score"] = item
+            await _emit_if_ready(tx_id)
+
+    await asyncio.gather(_drain_validation(), _drain_score())
+
+
+# ── DB Store Worker (subscriber of Release_Event_Broker) ─────────────────────
+
+async def _db_store_worker() -> None:
+    """
+    Subscriber of Release_Event_Broker.
+    Persists the fully validated and scored transaction in the European
+    Custom DB, then updates the in-memory live queue and SSE clients.
+    If risk_score is amber or red the suspicious flag is set via identifier.
+    """
+    q = broker.subscribe(RELEASE_EVENT)
+    while True:
+        msg = await q.get()
+        tx         = msg["tx"]
+        risk_score = msg["risk_score"]
+        alarm_id   = msg.get("alarm_id")
+
+        insert_transaction(tx)
+
+        if risk_score in ("amber", "red"):
+            flag_transaction_suspicious(tx["transaction_id"], alarm_id, risk_score)
+
+        # Enrich row for live queue and SSE
+        row = dict(tx)
+        row["suspicious"]    = 1 if risk_score in ("amber", "red") else 0
+        row["risk_score"]    = risk_score
+        row["risk_1_flagged"] = msg["risk_1_flagged"]
+        row["risk_2_flagged"] = msg["risk_2_flagged"]
         _live_queue.appendleft(row)
 
-        # Push to all connected SSE clients
         if _sse_queues:
             payload = _json.dumps(row)
             dead = set()
@@ -177,64 +393,26 @@ async def _alarm_worker() -> None:
                     dead.add(sse_q)
             _sse_queues.difference_update(dead)
 
-        if suspicious:
-            # Determine alarm context for the agent (from new or existing alarm)
-            alarm_ctx = new_alarm or next(
-                (a for a in _live_alarms
-                 if a.get("id") == alarm_id),
-                {},
-            )
-            await broker.publish("alarm_fired", {
-                "tx":       row,
-                "alarm_id": alarm_id,
-                "alarm":    alarm_ctx,
-            })
 
-        expire_old_alarms(row["transaction_date"][:19])
-
-
-# ── Worker 3: DB flag subscriber ──────────────────────────────────────────────
-
-async def _db_flag_worker() -> None:
-    """
-    Subscribes to 'alarm_fired'.
-    Updates the stored transaction record using its identifier:
-    sets suspicious=1, links the alarm, and sets suspicion_level='medium'.
-    This is the pub/sub DB update step — the alarm process never touches
-    the transaction row directly.
-    """
-    q = broker.subscribe("alarm_fired")
-    while True:
-        item = await q.get()
-        flag_transaction_suspicious(
-            item["tx"]["transaction_id"],
-            item["alarm_id"],
-        )
-
-
-# ── Worker 4: Agent AI subscriber ─────────────────────────────────────────────
+# ── Agent Worker (triggered manually from dashboard) ─────────────────────────
 
 async def _agent_worker() -> None:
     """
-    Subscribes to 'alarm_fired'.
+    Reads from _agent_queue, which is populated by POST /api/agent/analyse.
     Runs the Claude-powered VAT compliance analysis in a thread pool.
-    On verdict:
-      - 'incorrect' → escalates suspicion_level to 'high', inserts into ireland_queue
-      - 'correct' / 'uncertain' → clears the suspicious flag
+    verdict 'incorrect' → escalate to high + insert ireland_queue
+    verdict 'correct'/'uncertain' → clear suspicious flag
     """
     import concurrent.futures
     from lib.agent_bridge import analyse_transaction_sync
-
-    global _agent_sub
-    _agent_sub = broker.subscribe("alarm_fired")
 
     loop = asyncio.get_event_loop()
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
     while True:
-        item  = await _agent_sub.get()
+        item  = await _agent_queue.get()
         tx    = item["tx"]
-        alarm = item["alarm"]
+        alarm = item.get("alarm", {})
         tx_id = tx["transaction_id"]
 
         _agent_processing[tx_id] = {
@@ -253,7 +431,6 @@ async def _agent_worker() -> None:
             reasoning        = result.get("reasoning", "")
             legislation_refs = result.get("legislation_refs", [])
             now_str          = datetime.now(timezone.utc).isoformat()
-            sent_to_ireland  = 1 if verdict == "incorrect" else 0
 
             insert_agent_log({
                 "transaction_id":   tx_id,
@@ -267,7 +444,7 @@ async def _agent_worker() -> None:
                 "verdict":          verdict,
                 "reasoning":        reasoning,
                 "legislation_refs": _json.dumps(legislation_refs),
-                "sent_to_ireland":  sent_to_ireland,
+                "sent_to_ireland":  1 if verdict == "incorrect" else 0,
                 "processed_at":     now_str,
             })
 
@@ -300,36 +477,37 @@ async def _agent_worker() -> None:
             print(f"[agent_worker] error: {exc}\n{traceback.format_exc()}")
         finally:
             _agent_processing.pop(tx_id, None)
+            _agent_queue.task_done()
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _agent_queue
     from lib.database import init_european_custom_db, init_simulation_db
     init_european_custom_db()
     init_simulation_db()
 
-    sim_task      = asyncio.create_task(simulation_loop(_fire_transactions))
-    db_store_task = asyncio.create_task(_db_store_worker())
-    alarm_task    = asyncio.create_task(_alarm_worker())
-    db_flag_task  = asyncio.create_task(_db_flag_worker())
-    agent_task    = asyncio.create_task(_agent_worker())
+    _agent_queue = asyncio.Queue()
+
+    asyncio.create_task(simulation_loop(_fire_transactions))
+    asyncio.create_task(_RT_risk_monitoring_1_factory())
+    asyncio.create_task(_RT_risk_monitoring_2_factory())
+    asyncio.create_task(_RT_consolidation_factory())
+    asyncio.create_task(_order_validation_factory())
+    asyncio.create_task(_release_factory())
+    asyncio.create_task(_db_store_worker())
+    asyncio.create_task(_agent_worker())
 
     yield
-
-    sim_task.cancel()
-    db_store_task.cancel()
-    alarm_task.cancel()
-    db_flag_task.cancel()
-    agent_task.cancel()
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
     title="European Custom Data Hub — RTDemo",
-    version="3.0.0",
+    version="4.0.0",
     lifespan=lifespan,
 )
 
@@ -438,7 +616,7 @@ def api_get_suspicious(limit: int = Query(50, ge=1, le=200)):
     return get_suspicious_transactions(limit=limit)
 
 
-# ── Agent log & processing ────────────────────────────────────────────────────
+# ── Agent log, processing & dashboard trigger ─────────────────────────────────
 
 @app.get("/api/agent-log")
 def api_agent_log(limit: int = Query(100, ge=1, le=500)):
@@ -447,8 +625,35 @@ def api_agent_log(limit: int = Query(100, ge=1, le=500)):
 
 @app.get("/api/agent-processing")
 def api_agent_processing():
-    """In-memory snapshot of transactions currently being analysed."""
     return list(_agent_processing.values())
+
+
+@app.post("/api/agent/analyse/{transaction_id}")
+def api_trigger_agent(transaction_id: str):
+    """
+    Dashboard endpoint — queues a transaction for AI agent analysis.
+    Fetches the transaction and its alarm context from the DB, then
+    pushes to _agent_queue for processing by _agent_worker.
+    """
+    if _agent_queue is None:
+        return JSONResponse(status_code=503, content={"detail": "Agent not ready"})
+
+    tx = get_transaction_by_id(transaction_id)
+    if not tx:
+        return JSONResponse(status_code=404, content={"detail": "Transaction not found"})
+
+    if any(p["transaction_id"] == transaction_id for p in _agent_processing.values()):
+        return {"ok": False, "reason": "already processing"}
+
+    # Find alarm context from in-memory alarms or DB
+    alarm_key = f"{tx['seller_id']}|{tx['buyer_country']}"
+    alarm_ctx = next(
+        (a for a in _live_alarms if a.get("alarm_key") == alarm_key),
+        {},
+    )
+
+    _agent_queue.put_nowait({"tx": tx, "alarm": alarm_ctx})
+    return {"ok": True, "queued": transaction_id}
 
 
 # ── Ireland queue & case detail ───────────────────────────────────────────────
@@ -474,7 +679,7 @@ def sim_status():
     s = state.to_dict()
     s.update(counts)
     s["active_alarms"]    = len(get_alarms(active_only=True))
-    s["agent_queue_len"]  = _agent_sub.qsize() if _agent_sub else 0
+    s["agent_queue_len"]  = _agent_queue.qsize() if _agent_queue else 0
     s["agent_processing"] = len(_agent_processing)
     return s
 
