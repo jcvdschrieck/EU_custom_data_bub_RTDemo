@@ -104,13 +104,13 @@ pip install -r requirements.txt
 ### 3. AI agent — LM Studio (optional)
 
 The VAT fraud detection agent calls a **locally hosted LLM via [LM Studio](https://lmstudio.ai)**.
-No API key or internet connection is needed for the agent — it runs entirely on your machine.
+No API key or internet connection is needed — it runs entirely on your machine.
 
 **Setup:**
 1. Download and install [LM Studio](https://lmstudio.ai)
 2. Download a model (any instruction-tuned model works; a 7–8B model is recommended)
 3. In LM Studio, go to the **Developer** tab and start the local server (default port: `1234`)
-4. Copy the env example and set your model identifier:
+4. Copy the env example and fill in your model identifier:
 
 ```bash
 cp vat_fraud_detection/.env.example vat_fraud_detection/.env
@@ -122,12 +122,16 @@ LM_STUDIO_BASE_URL=http://localhost:1234/v1
 LM_STUDIO_MODEL=your-model-identifier-here
 ```
 
-To find the exact model identifier, query LM Studio's API:
+To find the exact model identifier, query the LM Studio server:
 ```bash
 curl http://localhost:1234/v1/models
 ```
 
+The application reads `vat_fraud_detection/.env` automatically — no need to export environment variables manually.
+
 > **Without LM Studio running**, the agent will still function — suspicious transactions will receive an `uncertain` verdict instead of a full AI-powered compliance analysis.
+
+> **Note on RAG context:** The vector store (`data/chroma_db/`) and legislation documents are not included in the repository. The agent will still produce verdicts using its base LLM reasoning, but without retrieval-augmented legislation references.
 
 ### 4. Frontend dependencies and build
 

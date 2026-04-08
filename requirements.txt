@@ -6,11 +6,10 @@ pydantic>=2.6.0
 aiofiles>=23.0
 
 # ── VAT Fraud Detection agent (submodule: vat_fraud_detection/) ───────────────
-anthropic>=0.28
 chromadb>=0.5
 sentence-transformers>=3.0
 python-dotenv>=1.0
-openai>=1.0          # LM Studio OpenAI-compatible API (optional local model)
+openai>=1.0          # LM Studio OpenAI-compatible API
 pdfplumber>=0.11
 Pillow>=10.0
 requests>=2.32
