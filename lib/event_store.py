@@ -5,24 +5,30 @@ Directory layout
 ────────────────
 data/events/
   sales_order_event/
-    20260308T142301123456_<tx_id[:12]>.json
+    <orderIdentifier>_sales_order_event.json
   rt_risk_1_outcome/
-    ...
+    <orderIdentifier>_rt_risk_1_outcome.json
   rt_risk_2_outcome/
   rt_score/
   order_validation/
+  arrival_notification/
   release_event/
 
-Each file is the full message payload wrapped in an _event_meta envelope:
+Each file is the clean, schema-conforming version of the message wrapped in
+a _event_meta envelope:
   {
     "_event_meta": {
-      "event_id":       "<uuid4>",
-      "topic":          "<topic name>",
-      "published_at":   "<ISO timestamp>",
-      "sales_order_id": "<original transaction_id for reconciliation>"
+      "event_id":         "<uuid4>",
+      "topic":            "<topic name>",
+      "published_at":     "<ISO timestamp>",
+      "order_identifier": "<orderIdentifier for reconciliation>"
     },
-    ... message fields ...
+    ... clean message fields (no internal flat fields) ...
   }
+
+Sales Order Event files follow simplified_order.json.
+Arrival Notification files follow availability-notification_simplified.json.
+All other topic files contain: {orderIdentifier, timestamp, messageTopic, outcome}.
 
 Flushing
 ────────
@@ -46,13 +52,12 @@ def _topic_dir(topic: str) -> Path:
     return d
 
 
-def _extract_sales_order_id(message: dict) -> str:
-    """Walk the message to find the originating transaction_id."""
+def _extract_order_identifier(file_payload: dict) -> str:
+    """Extract the orderIdentifier from a clean file payload."""
     return (
-        message.get("sales_order_id")
-        or message.get("transaction_id")
-        or (message.get("tx") or {}).get("sales_order_id")
-        or (message.get("tx") or {}).get("transaction_id")
+        file_payload.get("orderIdentifier")
+        or (file_payload.get("HouseConsignment") or {}).get("Order", {}).get("orderIdentifier")
+        or file_payload.get("sales_order_id")
         or "unknown"
     )
 
@@ -60,23 +65,26 @@ def _extract_sales_order_id(message: dict) -> str:
 def write_event(topic: str, message: dict) -> None:
     """
     Persist *message* as a JSON file under data/events/<topic>/.
-    The file includes a _event_meta envelope with reconciliation fields.
-    Runs synchronously — acceptable given the 120 ms simulation pacing.
+
+    The file content is the clean, schema-conforming payload (internal
+    flat fields stripped) wrapped in a _event_meta envelope.
+    File name: <orderIdentifier>_<topic>.json
     """
-    sales_order_id = _extract_sales_order_id(message)
+    from lib.message_factory import build_file_payload
+
+    file_payload     = build_file_payload(topic, message)
+    order_identifier = _extract_order_identifier(file_payload)
+    filename         = f"{order_identifier}_{topic}.json"
+
     ts = datetime.now(timezone.utc)
-    filename = (
-        f"{ts.strftime('%Y%m%dT%H%M%S%f')}"
-        f"_{sales_order_id[:12]}.json"
-    )
     envelope = {
         "_event_meta": {
-            "event_id":       str(uuid.uuid4()),
-            "topic":          topic,
-            "published_at":   ts.isoformat(),
-            "sales_order_id": sales_order_id,
+            "event_id":         str(uuid.uuid4()),
+            "topic":            topic,
+            "published_at":     ts.isoformat(),
+            "order_identifier": order_identifier,
         },
-        **message,
+        **file_payload,
     }
     path = _topic_dir(topic) / filename
     with open(path, "w", encoding="utf-8") as fh:
@@ -102,15 +110,26 @@ def event_count(topic: str | None = None) -> int:
 
 
 def count_field_value(topic: str, field: str, value) -> int:
-    """Count persisted events for *topic* where the top-level *field* equals *value*."""
-    import json as _json
+    """
+    Count persisted events for *topic* where *field* equals *value*.
+
+    *field* supports dot-notation for nested fields, e.g. "outcome.flagged"
+    to reach {"outcome": {"flagged": true}}.
+    """
     d = EVENTS_DIR / topic
     if not d.exists():
         return 0
+    parts = field.split(".")
     n = 0
     for f in d.glob("*.json"):
         try:
-            if _json.loads(f.read_text()).get(field) == value:
+            data = json.loads(f.read_text())
+            cur: object = data
+            for part in parts:
+                if not isinstance(cur, dict):
+                    break
+                cur = cur.get(part)
+            if cur == value:
                 n += 1
         except Exception:
             pass

@@ -143,11 +143,13 @@ _agent_queue:      asyncio.Queue | None = None  # populated by POST /api/agent/a
 async def _fire_transactions(rows: list[dict]) -> None:
     """
     Entry point called by the simulation loop (always called with a single row).
-    Publishes the transaction to the Sales-order Event Broker.
+    Transforms each flat DB row into a Sales Order Event (simplified_order.json schema)
+    and publishes it to the Sales-order Event Broker.
     Inter-event pacing is handled entirely by the simulation loop.
     """
+    from lib.message_factory import build_sales_order_event
     for row in rows:
-        await broker.publish(SALES_ORDER_EVENT, row)
+        await broker.publish(SALES_ORDER_EVENT, build_sales_order_event(row))
 
 
 # ── RT Risk Monitoring 1 Factory (VAT ratio deviation) ───────────────────────
@@ -329,9 +331,12 @@ async def _arrival_notification_factory() -> None:
     async def _schedule_listener():
         while True:
             tx = await q.get()
-            tx_time_str = tx.get("transaction_date", "")
+            tx_time_str = (
+                tx.get("documentIssueDateAndTime")
+                or tx.get("transaction_date", "")
+            )
             try:
-                tx_time = datetime.fromisoformat(tx_time_str)
+                tx_time = datetime.fromisoformat(tx_time_str.rstrip("Z"))
                 if tx_time.tzinfo is None:
                     tx_time = tx_time.replace(tzinfo=timezone.utc)
             except Exception:
@@ -339,13 +344,8 @@ async def _arrival_notification_factory() -> None:
             delay_hours = min(random.expovariate(1.0 / MEAN_SIM_HOURS), MAX_SIM_HOURS)
             from datetime import timedelta
             target_time = tx_time + timedelta(hours=delay_hours)
-            payload = {
-                "sales_order_id":   tx.get("transaction_id") or tx.get("sales_order_id"),
-                "transaction_id":   tx.get("transaction_id") or tx.get("sales_order_id"),
-                "arrival_notif_at": target_time.isoformat(),
-                "seller_id":        tx.get("seller_id"),
-                "buyer_country":    tx.get("buyer_country"),
-            }
+            from lib.message_factory import build_arrival_notification
+            payload = build_arrival_notification(tx, target_time)
             pending.append((target_time, payload))
 
     async def _clock_emitter():
@@ -412,7 +412,12 @@ async def _release_factory() -> None:
         q = broker.subscribe(ARRIVAL_NOTIFICATION)
         while True:
             item = await q.get()
-            tx_id = item.get("transaction_id") or item.get("sales_order_id")
+            tx_id = (
+                item.get("orderIdentifier")
+                or item.get("transaction_id")
+                or item.get("sales_order_id")
+                or ((item.get("HouseConsignment") or {}).get("Order") or {}).get("orderIdentifier")
+            )
             if tx_id:
                 _buffer.setdefault(tx_id, {})["arrival"] = item
                 await _emit_if_ready(tx_id)
@@ -758,11 +763,11 @@ def sim_pipeline():
         "queues": {t: _broker.qsize(t) for t in topics},
         "stored_count": get_transaction_count(),
         "risk_flags": {
-            "rt_risk_1_flagged": count_field_value(RT_RISK_1_OUTCOME, "flagged", True),
-            "rt_risk_2_flagged": count_field_value(RT_RISK_2_OUTCOME, "flagged", True),
-            "rt_score_green":    count_field_value(RT_SCORE, "risk_score", "green"),
-            "rt_score_amber":    count_field_value(RT_SCORE, "risk_score", "amber"),
-            "rt_score_red":      count_field_value(RT_SCORE, "risk_score", "red"),
+            "rt_risk_1_flagged": count_field_value(RT_RISK_1_OUTCOME, "outcome.flagged", True),
+            "rt_risk_2_flagged": count_field_value(RT_RISK_2_OUTCOME, "outcome.flagged", True),
+            "rt_score_green":    count_field_value(RT_SCORE, "outcome.risk_score", "green"),
+            "rt_score_amber":    count_field_value(RT_SCORE, "outcome.risk_score", "amber"),
+            "rt_score_red":      count_field_value(RT_SCORE, "outcome.risk_score", "red"),
         },
     }
 

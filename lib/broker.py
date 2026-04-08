@@ -25,15 +25,21 @@ def _inject_sales_order_id(message: dict) -> None:
     """
     Ensure every message carries sales_order_id at the top level.
     Derived from the first available source in priority order:
-      existing sales_order_id → top-level transaction_id → tx.sales_order_id → tx.transaction_id
+      existing sales_order_id
+      → top-level transaction_id / orderIdentifier (new schema)
+      → HouseConsignment.Order.orderIdentifier (arrival notification)
+      → tx.sales_order_id / tx.transaction_id / tx.orderIdentifier
     Mutates the dict in-place so the field propagates to all subscribers.
     """
     if message.get("sales_order_id"):
         return
     soid = (
         message.get("transaction_id")
+        or message.get("orderIdentifier")
+        or ((message.get("HouseConsignment") or {}).get("Order") or {}).get("orderIdentifier")
         or (message.get("tx") or {}).get("sales_order_id")
         or (message.get("tx") or {}).get("transaction_id")
+        or (message.get("tx") or {}).get("orderIdentifier")
     )
     if soid:
         message["sales_order_id"] = soid
