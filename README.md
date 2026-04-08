@@ -110,13 +110,15 @@ No API key or internet connection is needed — it runs entirely on your machine
 1. Download and install [LM Studio](https://lmstudio.ai)
 2. Download a model (any instruction-tuned model works; a 7–8B model is recommended)
 3. In LM Studio, go to the **Developer** tab and start the local server (default port: `1234`)
-4. Copy the env example and fill in your model identifier:
+4. Configure the model identifier.
+
+`vat_fraud_detection/` is a git submodule included in this repository (populated by the `--recurse-submodules` clone in step 1). Create its `.env` file from the bundled example:
 
 ```bash
 cp vat_fraud_detection/.env.example vat_fraud_detection/.env
 ```
 
-Edit `vat_fraud_detection/.env`:
+Then edit `vat_fraud_detection/.env`:
 ```
 LM_STUDIO_BASE_URL=http://localhost:1234/v1
 LM_STUDIO_MODEL=your-model-identifier-here
@@ -127,7 +129,7 @@ To find the exact model identifier, query the LM Studio server:
 curl http://localhost:1234/v1/models
 ```
 
-The application reads `vat_fraud_detection/.env` automatically — no need to export environment variables manually.
+This `.env` file is read automatically at runtime — no need to export environment variables manually.
 
 > **Without LM Studio running**, the agent will still function — suspicious transactions will receive an `uncertain` verdict instead of a full AI-powered compliance analysis.
 
