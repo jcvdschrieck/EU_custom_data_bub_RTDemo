@@ -397,3 +397,29 @@ body {
   margin-right: 5px;
   animation: pulse 1.2s infinite;
 }
+
+/* ── Pipeline Flow horizontal scrollbar ──────────────────────────────────
+   The pipeline diagram exceeds viewport width. Make the horizontal scrollbar
+   permanently visible, thick, and branded so users can scroll the full flow. */
+.pipeline-scroll {
+  scrollbar-width: auto;                          /* Firefox */
+  scrollbar-color: var(--eu-blue) #e6e6e6;         /* Firefox */
+}
+.pipeline-scroll::-webkit-scrollbar {
+  height: 14px;
+  background: #e6e6e6;
+}
+.pipeline-scroll::-webkit-scrollbar-track {
+  background: #f0f0f0;
+  border-radius: 7px;
+  margin: 0 4px;
+}
+.pipeline-scroll::-webkit-scrollbar-thumb {
+  background: var(--eu-blue);
+  border-radius: 7px;
+  border: 2px solid #f0f0f0;
+  min-width: 60px;
+}
+.pipeline-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--eu-blue-hover);
+}

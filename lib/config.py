@@ -17,12 +17,15 @@ SIM_END_STR   = "2026-03-31T23:59:59"
 SIM_START_DT  = datetime.fromisoformat(SIM_START_STR).replace(tzinfo=timezone.utc)
 SIM_END_DT    = datetime.fromisoformat(SIM_END_STR).replace(tzinfo=timezone.utc)
 
-# Speed: simulated minutes that advance per real second
-# 50  → full March plays in ~15 real minutes  (default)
-# 150 → full March plays in  ~5 real minutes
-# 900 → full March plays in  ~50 real seconds
+# Speed: simulated minutes that advance per real second.
+# The UI exposes three user-facing multipliers that map onto this unit so that
+# ×1 plays the full active replay (March 2026, 44 640 sim-min) in ~15 real
+# minutes — the intended default horizon:
+#   ×1   → 50   sim-min/real-sec → full March in ~15 real minutes  (default)
+#   ×10  → 500  sim-min/real-sec → full March in  ~1.5 real minutes
+#   ×100 → 5000 sim-min/real-sec → full March in   ~9 real seconds
 DEFAULT_SPEED = 50.0
 MIN_SPEED     = 1.0
-MAX_SPEED     = 1500.0
+MAX_SPEED     = 5000.0
 
 QUEUE_SIZE = 30   # transactions shown in live queue

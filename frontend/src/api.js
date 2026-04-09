@@ -12,6 +12,17 @@ export const simResume      = ()       => http.post('/api/simulation/resume').th
 export const simReset       = ()       => http.post('/api/simulation/reset').then(r => r.data)
 export const simSetSpeed    = (speed)  => http.post('/api/simulation/speed', { speed }).then(r => r.data)
 
+// SSE stream carrying { status, pipeline } snapshots at ~5 Hz.
+// Usage: const es = openSimStateStream((snap) => { ... }); es.close() on unmount.
+export function openSimStateStream(onSnapshot, onError) {
+  const es = new EventSource('/api/simulation/stream')
+  es.onmessage = (ev) => {
+    try { onSnapshot(JSON.parse(ev.data)) } catch {}
+  }
+  if (onError) es.onerror = onError
+  return es
+}
+
 // ── Metrics & data ────────────────────────────────────────────────────────────
 export const getMetrics = (params) =>
   http.get('/api/metrics', { params: clean(params) }).then(r => r.data)

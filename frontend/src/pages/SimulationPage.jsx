@@ -1,18 +1,19 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import {
-  getSimStatus, getPipelineStats,
+  getSimStatus, getPipelineStats, openSimStateStream,
   simStart, simPause, simResume, simReset, simSetSpeed,
 } from '../api'
 
-// Speed = sim-minutes per real-second.  Full March (44 640 sim-min):
-//   10  → ~74 min   |  50  → ~15 min (default)  |  150 → ~5 min
-//  450  → ~100 sec  | 1500 → ~30 sec
+// User-facing speed multipliers. ×1 is defined as "full March (44 640 sim-min)
+// plays in ~15 real minutes" — the intended default horizon. The `value` sent
+// to the backend is sim-minutes per real-second.
+//   ×1   → 50    sim-min/real-sec → March in ~15 real minutes  (default)
+//   ×10  → 500   sim-min/real-sec → March in  ~1.5 real minutes
+//   ×100 → 5000  sim-min/real-sec → March in   ~9 real seconds
 const SPEEDS = [
-  { label: '10×',   value: 10   },
-  { label: '50×',   value: 50   },
-  { label: '150×',  value: 150  },
-  { label: '450×',  value: 450  },
-  { label: '1500×', value: 1500 },
+  { label: '×1',   value: 50   },
+  { label: '×10',  value: 500  },
+  { label: '×100', value: 5000 },
 ]
 
 function fmt(n) {
@@ -56,7 +57,7 @@ function SimControls({ status, onRefresh }) {
             <span className={`sim-dot ${dotClass}`} style={{ width: 12, height: 12 }} />
             <span style={{ fontSize: 17, fontWeight: 700, color: stateColor }}>{stateLabel}</span>
           </div>
-          <StatChip label="Sim date"    value={sim_time ? sim_time.slice(0, 10) : '—'} />
+          <StatChip label="Sim time"    value={sim_time ? sim_time.slice(0, 19).replace('T', ' ') : '—'} />
           <StatChip label="Fired"       value={`${fmt(fired_count)} / ${fmt(total)}`} />
           <StatChip label="Completion"  value={`${(pct_complete || 0).toFixed(1)}%`} />
           <StatChip label="Active alarms" value={fmt(active_alarms)} accent={active_alarms > 0 ? 'var(--error)' : null} />
@@ -113,37 +114,88 @@ function StatChip({ label, value, accent }) {
 
 // ── Node primitives ───────────────────────────────────────────────────────────
 
-function BrokerNode({ label, topicKey, count, queueSize, children, accent, sm }) {
-  const blue = accent || 'var(--eu-blue)'
-  const bg   = accent ? accent + '18' : 'var(--eu-blue-light)'
+// Solid light backgrounds for broker sub-boxes — mirror the ScoreBadges
+// palette (opaque colors, no alpha) so the sub-box doesn't pick up the parent
+// blue background through transparency.
+const BROKER_SUB_BG = {
+  '#1f7a3c': '#e8f5e9',  // green  → light green
+  '#c0392b': '#fde8e8',  // red    → light red
+  '#e6820a': '#fff3e0',  // orange → light amber
+}
+
+function BrokerNode({ label, topicKey, count, children, accent, sm, tooltip, width }) {
+  // Outer border is ALWAYS the EU blue "broker" color so all brokers read as
+  // the same element type. When an accent is provided (e.g. green for release,
+  // red for retain, orange for investigate), it moves to an inner sub-box that
+  // wraps the label and count — differentiating the broker's content type
+  // without breaking the "all brokers are blue" visual rule.
+  const blue = 'var(--eu-blue)'
+  const hasAccent = !!accent
+  const innerColor = accent || blue
+  const innerBg    = hasAccent ? (BROKER_SUB_BG[accent] || '#ffffff') : '#ffffff'
+  const defaultMinW = sm ? 100 : 130
   return (
-    <div style={{
-      background: bg, border: `2px solid ${blue}`,
-      borderRadius: 'var(--radius)', padding: sm ? '4px 7px' : '7px 10px',
-      minWidth: sm ? 100 : 130, textAlign: 'center', flex: '0 0 auto',
-    }}>
-      <div style={{ fontSize: 7, color: blue, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 2, fontWeight: 700 }}>{topicKey}</div>
-      <div style={{ fontSize: sm ? 9 : 10, fontWeight: 700, color: 'var(--text-primary)', marginBottom: sm ? 2 : 4, lineHeight: 1.3 }}>{label}</div>
-      <div style={{ fontSize: sm ? 16 : 20, fontWeight: 700, color: blue, lineHeight: 1 }}>{fmt(count)}</div>
-      <div style={{ fontSize: 8, color: 'var(--text-muted)', marginTop: 1 }}>events</div>
-      {queueSize > 0 && (
-        <div style={{ marginTop: 3, fontSize: 8, color: 'var(--warning)', fontWeight: 700, background: '#fff8e6', borderRadius: 8, padding: '1px 4px', display: 'inline-block' }}>
-          {queueSize} queued
-        </div>
-      )}
+    <div
+      title={tooltip}
+      style={{
+        background: 'var(--eu-blue-light)',
+        border: `2px solid ${blue}`,
+        borderRadius: 'var(--radius)',
+        padding: sm ? '3px 5px 4px' : '5px 7px 6px',
+        width: width || undefined,
+        minWidth: width || defaultMinW,
+        textAlign: 'center', flex: '0 0 auto',
+        cursor: tooltip ? 'help' : 'default',
+        boxSizing: 'border-box',
+      }}>
+      {/* Outer: topic key header */}
+      <div style={{
+        fontSize: 7, color: blue, textTransform: 'uppercase',
+        letterSpacing: '0.06em', marginBottom: 3, fontWeight: 700,
+      }}>{topicKey}</div>
+
+      {/* Inner sub-box: label + count + "events", colored by accent (if any) */}
+      <div style={{
+        background: innerBg,
+        border: `1.5px solid ${innerColor}`,
+        borderRadius: 3,
+        padding: sm ? '2px 4px 3px' : '3px 6px 4px',
+      }}>
+        <div style={{
+          fontSize: sm ? 9 : 10, fontWeight: 700,
+          color: 'var(--text-primary)',
+          lineHeight: 1.2, marginBottom: 1,
+        }}>{label}</div>
+        <div style={{
+          fontSize: sm ? 15 : 18, fontWeight: 700,
+          color: innerColor, lineHeight: 1,
+        }}>{fmt(count)}</div>
+        <div style={{
+          fontSize: 7, color: 'var(--text-muted)',
+          marginTop: 1, lineHeight: 1,
+        }}>events</div>
+      </div>
+
       {children}
     </div>
   )
 }
 
-function FactoryNode({ label, description, icon, accent, sm }) {
+function FactoryNode({ label, description, icon, accent, sm, tooltip, width }) {
+  const defaultMinW = sm ? 86 : 120
   return (
-    <div style={{
-      background: accent ? accent + '12' : '#f8f9fa',
-      border: `1px solid ${accent || 'var(--border)'}`,
-      borderRadius: 8, padding: sm ? '4px 7px' : '6px 10px',
-      minWidth: sm ? 86 : 120, textAlign: 'center', flex: '0 0 auto',
-    }}>
+    <div
+      title={tooltip}
+      style={{
+        background: accent ? accent + '12' : '#f8f9fa',
+        border: `1px solid ${accent || 'var(--border)'}`,
+        borderRadius: 8, padding: sm ? '4px 7px' : '6px 10px',
+        width: width || undefined,
+        minWidth: width || defaultMinW,
+        textAlign: 'center', flex: '0 0 auto',
+        cursor: tooltip ? 'help' : 'default',
+        boxSizing: 'border-box',
+      }}>
       <div style={{ fontSize: sm ? 13 : 15, marginBottom: 2 }}>{icon}</div>
       <div style={{ fontSize: sm ? 9 : 10, fontWeight: 700, color: 'var(--text-primary)', lineHeight: 1.3 }}>{label}</div>
       {description && <div style={{ fontSize: 8, color: 'var(--text-muted)', marginTop: 1 }}>{description}</div>}
@@ -151,35 +203,90 @@ function FactoryNode({ label, description, icon, accent, sm }) {
   )
 }
 
-function QueueNode({ label, count, accent = '#9c27b0' }) {
+function QueueNode({ label, count, accent, tooltip, sm }) {
+  // Default palette: gray, slightly darker than FactoryNode so the queue still
+  // reads as "processing-ish" but clearly in the factory family (not a broker).
+  // Caller can still pass `accent` to override (used if a colored queue is
+  // needed somewhere else in the future).
+  const borderColor = accent || '#868e96'             // gray-500 (darker than factory border #c8c8c8)
+  const bgColor     = accent ? accent + '15' : '#eceff1' // light gray bg (darker than factory #f8f9fa)
+  const textColor   = accent || '#495057'             // gray-700
   return (
-    <div style={{
-      background: accent + '15', border: `2px dashed ${accent}`,
-      borderRadius: 'var(--radius)', padding: '8px 12px',
-      minWidth: 130, textAlign: 'center', flex: '0 0 auto',
-    }}>
-      <div style={{ fontSize: 14, marginBottom: 2 }}>📋</div>
-      <div style={{ fontSize: 10, fontWeight: 700, color: accent, lineHeight: 1.3 }}>{label}</div>
+    <div
+      title={tooltip}
+      style={{
+        background: bgColor,
+        border: `2px dashed ${borderColor}`,
+        borderRadius: 'var(--radius)',
+        padding: sm ? '3px 10px 4px' : '8px 12px',
+        minWidth: sm ? 120 : 130, textAlign: 'center', flex: '0 0 auto',
+        cursor: tooltip ? 'help' : 'default',
+      }}>
+      <div style={{ fontSize: sm ? 11 : 14, marginBottom: sm ? 0 : 2, lineHeight: 1 }}>📋</div>
+      <div style={{ fontSize: sm ? 9 : 10, fontWeight: 700, color: textColor, lineHeight: 1.2 }}>{label}</div>
       {count != null && (
-        <div style={{ fontSize: 18, fontWeight: 700, color: accent, marginTop: 3 }}>{fmt(count)}</div>
+        <div style={{ fontSize: sm ? 14 : 18, fontWeight: 700, color: textColor, marginTop: sm ? 1 : 3, lineHeight: 1 }}>{fmt(count)}</div>
       )}
-      <div style={{ fontSize: 9, color: 'var(--text-muted)', marginTop: 1 }}>FIFO queue</div>
+      <div style={{ fontSize: sm ? 7 : 9, color: 'var(--text-muted)', marginTop: sm ? 0 : 1, lineHeight: 1.2 }}>FIFO queue</div>
     </div>
   )
 }
 
-function DBSinkNode({ count }) {
+// Database cylinder — visually distinct from brokers and factories.
+// Uses a sky-blue scheme (clearly a different shade from the dark EU event-
+// broker blue #003399) and an SVG cylinder icon so it reads as
+// "this is a persistent data store", not another event broker.
+function DBSinkNode({ count, newCount, tooltip }) {
+  const dbMain  = '#0284c7'   // sky blue 600
+  const dbDark  = '#075985'   // sky blue 800
+  const dbCap   = '#38bdf8'   // sky blue 400 (top cap highlight)
+  const dbLight = '#e0f2fe'   // sky blue 50
   return (
-    <div style={{
-      background: '#e8f0fe', border: '2px solid var(--eu-blue)',
-      borderRadius: 'var(--radius)', padding: '8px 12px',
-      minWidth: 130, textAlign: 'center', flex: '0 0 auto',
-    }}>
-      <div style={{ fontSize: 14, marginBottom: 2 }}>🏛️</div>
-      <div style={{ fontSize: 9, color: 'var(--eu-blue)', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 700, marginBottom: 3 }}>Custom Data Hub</div>
-      <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-primary)', marginBottom: 4, lineHeight: 1.3 }}>Stored transactions</div>
-      <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--eu-blue)', lineHeight: 1 }}>{fmt(count)}</div>
-      <div style={{ fontSize: 9, color: 'var(--text-muted)', marginTop: 1 }}>records</div>
+    <div
+      title={tooltip}
+      style={{
+        position: 'relative',
+        background: dbLight,
+        border: `2px solid ${dbMain}`,
+        borderRadius: 10,
+        padding: '8px 14px 10px',
+        minWidth: 150, textAlign: 'center', flex: '0 0 auto',
+        cursor: tooltip ? 'help' : 'default',
+        boxShadow: '0 1px 4px rgba(2, 132, 199, 0.18)',
+      }}>
+      {/* Cylinder icon — stylised DB shape */}
+      <svg width={30} height={24} viewBox="0 0 30 24" style={{ display: 'block', margin: '0 auto 2px' }}>
+        {/* bottom ellipse (back) */}
+        <ellipse cx={15} cy={20} rx={12} ry={3} fill={dbDark} />
+        {/* body */}
+        <rect x={3} y={4} width={24} height={16} fill={dbMain} />
+        {/* disk separator lines (subtle) */}
+        <ellipse cx={15} cy={9}  rx={12} ry={3} fill="none" stroke={dbDark} strokeWidth={0.5} opacity={0.45} />
+        <ellipse cx={15} cy={14} rx={12} ry={3} fill="none" stroke={dbDark} strokeWidth={0.5} opacity={0.45} />
+        {/* top ellipse (visible cap) */}
+        <ellipse cx={15} cy={4}  rx={12} ry={3} fill={dbCap} stroke={dbDark} strokeWidth={0.7} />
+      </svg>
+      <div style={{
+        fontSize: 9, color: dbDark,
+        textTransform: 'uppercase', letterSpacing: '0.08em',
+        fontWeight: 700, marginBottom: 2,
+      }}>Custom Data Hub</div>
+      <div style={{ fontSize: 9, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 4, lineHeight: 1.2 }}>
+        MongoDB · Stored transactions
+      </div>
+      <div style={{ fontSize: 22, fontWeight: 700, color: dbDark, lineHeight: 1 }}>
+        {fmt(count)}
+      </div>
+      <div style={{ fontSize: 9, color: 'var(--text-muted)', marginTop: 1 }}>records total</div>
+      {newCount > 0 && (
+        <div style={{
+          marginTop: 4, fontSize: 10, fontWeight: 700, color: '#1f7a3c',
+          background: '#e8f5e9', border: '1px solid #1f7a3c88',
+          borderRadius: 10, padding: '1px 8px', display: 'inline-block',
+        }}>
+          +{fmt(newCount)} new
+        </div>
+      )}
     </div>
   )
 }
@@ -220,6 +327,8 @@ function ZoneLabel({ children, color }) {
       fontSize: 9, fontWeight: 700, color: color || 'var(--text-muted)',
       textTransform: 'uppercase', letterSpacing: '0.08em',
       textAlign: 'center', marginBottom: 6,
+      position: 'sticky', top: 0, zIndex: 2,
+      background: '#fff', padding: '2px 4px',
     }}>{children}</div>
   )
 }
@@ -305,6 +414,25 @@ function FanOutMixedSVG({ height, targets, width = 56 }) {
   )
 }
 
+// Curved-up arrow used to indicate "goes to DB Store Factory above" without
+// drawing an arrow that physically crosses into the routing row container.
+function CurveUpArrow({ color = '#adb5bd', label, width = 48, height = 40 }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1, flex: '0 0 auto' }}>
+      <svg width={width} height={height} style={{ overflow: 'visible' }}>
+        <path
+          d={`M 4 ${height - 4} Q 4 4 ${width - 10} 4`}
+          stroke={color} strokeWidth={2} fill="none" strokeLinecap="round"
+        />
+        <polygon points={`${width-10},0 ${width-2},4 ${width-10},8`} fill={color} />
+      </svg>
+      {label && (
+        <div style={{ fontSize: 8, color, fontWeight: 700, whiteSpace: 'nowrap' }}>{label}</div>
+      )}
+    </div>
+  )
+}
+
 function FanInSVG({ height, inputYs, outputY, color = '#adb5bd', width = 48 }) {
   if (!inputYs || !inputYs.length) return null
   const spineX = width - 8
@@ -323,6 +451,325 @@ function FanInSVG({ height, inputYs, outputY, color = '#adb5bd', width = 48 }) {
   )
 }
 
+// ── Middle section: DB Store + Hub (grouped in a dashed zone) + after-Inv
+// brokers (mirroring event brokers) + inline investigation pipeline ──────────
+//
+// An absolute-positioned canvas that holds the second half of the pipeline on
+// a single literal row. Release / Retain / Investigate events arrive from the
+// left edge (x=0) at Y levels matching the parent flow (passed as props).
+//
+// DB Store Factory and the Custom Data Hub cylinder are wrapped in a single
+// dashed zone — incoming arrows terminate at the zone's outer border rather
+// than the individual elements, like Order Validation / RT Risk / Transport
+// zones on the left.
+//
+// Loop-back arrows:
+//   Post-Inv Release → Release-after-Inv  (green, bottom → top)
+//   VAT Agent        → Retained-after-Inv (red, "incorrect" branch)
+// Vertical legs are routed OUTSIDE the after-Inv broker x range so the lines
+// don't pass through the box interiors.
+function MiddleSection({ ev, rf, inv, stored, newStored, H, yRel, yRet, yInv }) {
+  const Y_REL = yRel
+  const Y_RET = yRet
+  const Y_INV = yInv
+
+  // Incoming-arrow runway on the left edge
+  const IN_ARROW_W = 60
+
+  // ── DB Store · Hub group (dashed zone) ───────────────────────────────────
+  // The zone must contain Y_REL and Y_RET so horizontal arrows can terminate
+  // at its left/right borders at those Y values.
+  const ZONE_LEFT   = IN_ARROW_W
+  const ZONE_W      = 210
+  const ZONE_TOP    = 10                       // above Y_REL so border sits above it
+  const ZONE_H      = Y_RET + 90 - ZONE_TOP    // extends well below Y_RET
+  const ZONE_RIGHT  = ZONE_LEFT + ZONE_W       // 270
+  const ZONE_BOTTOM = ZONE_TOP + ZONE_H
+
+  // ── After-Inv brokers (mirror Release / Retain event brokers) ────────────
+  const AFT_W = 150
+  const AFT_H = 78
+  const AFT_LEFT   = ZONE_RIGHT + 56          // 326
+  const AFT_RIGHT  = AFT_LEFT + AFT_W         // 476
+  const RAFT_TOP   = Y_REL - AFT_H / 2
+  const RETAFT_TOP = Y_RET - AFT_H / 2
+
+  // ── Investigation pipeline at Y_INV (bottom band) ────────────────────────
+  const INV_ROW_CY   = Y_INV                   // vertical center of investigation elements
+  const INVFACT_W    = 130
+  const INVFACT_LEFT = IN_ARROW_W
+  const QUEUE_W      = 134
+  const QUEUE_LEFT   = INVFACT_LEFT + INVFACT_W + 22
+  const AGENT_W      = 140
+  const AGENT_LEFT   = QUEUE_LEFT + QUEUE_W + 22
+  const AGENT_RIGHT  = AGENT_LEFT + AGENT_W
+  const CLRREL_W     = 126
+  const CLRREL_LEFT  = AGENT_RIGHT + 28
+  const POSTINV_W    = 158
+  const POSTINV_LEFT = CLRREL_LEFT + CLRREL_W + 24
+  const POSTINV_RIGHT = POSTINV_LEFT + POSTINV_W
+
+  // Total canvas width — leaves room on the right for the Post-Inv loop-back column
+  const W = POSTINV_RIGHT + 48
+
+  // Approximate factory/broker heights for Y alignment on the bottom band
+  const INV_FACT_H = 56
+  const INV_ROW_TOP = INV_ROW_CY - INV_FACT_H / 2
+
+  // ── Loop-back routing ────────────────────────────────────────────────────
+  // Vertical legs MUST lie outside the after-Inv broker x range [AFT_LEFT, AFT_RIGHT]
+  // so they don't cross the broker interiors.
+  //
+  // Post-Inv Release → Release-after-Inv: vertical at POSTINV_CX (>> AFT_RIGHT)
+  const POSTINV_CX = POSTINV_LEFT + POSTINV_W / 2
+  // Agent → Retained-after-Inv (incorrect): vertical at AFT_RIGHT + margin, which
+  // is inside the Agent's x range so the exit point is on the Agent's top edge.
+  const RETAIN_UP_X = AFT_RIGHT + 20          // 496, inside Agent x range (AGENT_LEFT..AGENT_RIGHT)
+
+  const stroke = 2
+  const grey   = '#adb5bd'
+  const green  = '#1f7a3c'
+  const red    = '#c0392b'
+  const orange = '#e6820a'
+  const purple = '#9c27b0'
+
+  // Small helper for arrowheads at a point, given direction
+  const Arrowhead = ({ x, y, dir, color }) => {
+    const s = 6
+    let pts
+    if      (dir === 'right') pts = `${x-s},${y-s} ${x},${y} ${x-s},${y+s}`
+    else if (dir === 'left')  pts = `${x+s},${y-s} ${x},${y} ${x+s},${y+s}`
+    else if (dir === 'down')  pts = `${x-s},${y-s} ${x},${y} ${x+s},${y-s}`
+    else                      pts = `${x-s},${y+s} ${x},${y} ${x+s},${y+s}`
+    return <polygon points={pts} fill={color} />
+  }
+
+  return (
+    <div style={{ position: 'relative', width: W, height: H, flexShrink: 0 }}>
+      {/* Arrow/connector overlay */}
+      <svg style={{ position: 'absolute', top: 0, left: 0, width: W, height: H, pointerEvents: 'none', overflow: 'visible' }}>
+        {/* Release Event → Zone left border (horizontal at Y_REL) */}
+        <line x1={0} y1={Y_REL} x2={ZONE_LEFT} y2={Y_REL} stroke={green} strokeWidth={stroke} />
+        <Arrowhead x={ZONE_LEFT} y={Y_REL} dir="right" color={green} />
+
+        {/* Retain Event → Zone left border (horizontal at Y_RET) */}
+        <line x1={0} y1={Y_RET} x2={ZONE_LEFT} y2={Y_RET} stroke={red} strokeWidth={stroke} />
+        <Arrowhead x={ZONE_LEFT} y={Y_RET} dir="right" color={red} />
+
+        {/* Release-after-Inv → Zone right border (horizontal at Y_REL, going left) */}
+        <line x1={AFT_LEFT} y1={Y_REL} x2={ZONE_RIGHT} y2={Y_REL} stroke={green} strokeWidth={stroke} />
+        <Arrowhead x={ZONE_RIGHT} y={Y_REL} dir="left" color={green} />
+
+        {/* Retained-after-Inv → Zone right border (horizontal at Y_RET, going left) */}
+        <line x1={AFT_LEFT} y1={Y_RET} x2={ZONE_RIGHT} y2={Y_RET} stroke={red} strokeWidth={stroke} />
+        <Arrowhead x={ZONE_RIGHT} y={Y_RET} dir="left" color={red} />
+
+        {/* Investigate Event → Investigator Factory (horizontal at Y_INV) */}
+        <line x1={0} y1={Y_INV} x2={INVFACT_LEFT} y2={Y_INV} stroke={orange} strokeWidth={stroke} />
+        <Arrowhead x={INVFACT_LEFT} y={Y_INV} dir="right" color={orange} />
+
+        {/* Investigator → Queue */}
+        <line x1={INVFACT_LEFT + INVFACT_W} y1={Y_INV} x2={QUEUE_LEFT} y2={Y_INV} stroke={purple} strokeWidth={stroke} />
+        <Arrowhead x={QUEUE_LEFT} y={Y_INV} dir="right" color={purple} />
+
+        {/* Queue → Agent */}
+        <line x1={QUEUE_LEFT + QUEUE_W} y1={Y_INV} x2={AGENT_LEFT} y2={Y_INV} stroke={purple} strokeWidth={stroke} />
+        <Arrowhead x={AGENT_LEFT} y={Y_INV} dir="right" color={purple} />
+
+        {/* Agent → Cleared for Release (correct/uncertain) */}
+        <line x1={AGENT_RIGHT} y1={Y_INV} x2={CLRREL_LEFT} y2={Y_INV} stroke={green} strokeWidth={stroke} />
+        <Arrowhead x={CLRREL_LEFT} y={Y_INV} dir="right" color={green} />
+        <text x={(AGENT_RIGHT + CLRREL_LEFT) / 2} y={Y_INV - 6}
+              fontSize={9} fill={green} textAnchor="middle" fontWeight={700}>correct</text>
+
+        {/* Cleared → Post-Inv Release */}
+        <line x1={CLRREL_LEFT + CLRREL_W} y1={Y_INV} x2={POSTINV_LEFT} y2={Y_INV} stroke={green} strokeWidth={stroke} />
+        <Arrowhead x={POSTINV_LEFT} y={Y_INV} dir="right" color={green} />
+
+        {/* Post-Inv Release → Release-after-Inv (loop-back: up, then left) */}
+        <polyline
+          points={`${POSTINV_CX},${INV_ROW_TOP} ${POSTINV_CX},${Y_REL} ${AFT_RIGHT},${Y_REL}`}
+          stroke={green} strokeWidth={stroke} fill="none" />
+        <Arrowhead x={AFT_RIGHT} y={Y_REL} dir="left" color={green} />
+
+        {/* Agent → Retained-after-Inv (incorrect: up, then left).
+            Vertical leg at RETAIN_UP_X is outside the broker x range, so it
+            doesn't pass through the box interior. */}
+        <polyline
+          points={`${RETAIN_UP_X},${INV_ROW_TOP} ${RETAIN_UP_X},${Y_RET} ${AFT_RIGHT},${Y_RET}`}
+          stroke={red} strokeWidth={stroke} fill="none" />
+        <Arrowhead x={AFT_RIGHT} y={Y_RET} dir="left" color={red} />
+        <text x={RETAIN_UP_X + 4} y={INV_ROW_TOP - 4}
+              fontSize={9} fill={red} textAnchor="start" fontWeight={700}>incorrect</text>
+      </svg>
+
+      {/* ── DB Store · Hub dashed zone (mirrors Order Validation / RT Risk / Transport on the left) ── */}
+      <div style={{
+        position: 'absolute', top: ZONE_TOP, left: ZONE_LEFT,
+        width: ZONE_W, height: ZONE_H,
+        border: '1px dashed var(--border-light)', borderRadius: 6,
+        padding: '8px 10px', boxSizing: 'border-box',
+      }}>
+        <div style={{
+          fontSize: 9, fontWeight: 700, color: 'var(--text-muted)',
+          textTransform: 'uppercase', letterSpacing: '0.08em',
+          textAlign: 'center', marginBottom: 6,
+          position: 'sticky', top: 0, zIndex: 2, background: '#fff', padding: '2px 4px',
+        }}>
+          Data Store
+        </div>
+        <div style={{
+          display: 'flex', flexDirection: 'column', alignItems: 'center',
+          gap: 6, height: 'calc(100% - 32px)', justifyContent: 'center',
+        }}>
+          <FactoryNode icon="💾" label="DB Store Factory" description="Insert + flag suspicious" sm
+            tooltip="DB Store Factory — subscribes to Automated Release, Automated Retain, Release Post Inv. and Retain Post Inv. Inserts into european_custom.db and pushes to the live queue / SSE stream." />
+          <Arrow down />
+          <DBSinkNode count={stored} newCount={newStored}
+            tooltip={`Custom Data Hub — ${fmt(stored)} total records (includes historical seed). ${fmt(newStored)} new records stored since the last simulation reset.`} />
+        </div>
+      </div>
+
+      {/* Release Post Investigation broker — mirrors Automated Release */}
+      <div style={{ position: 'absolute', top: RAFT_TOP, left: AFT_LEFT, width: AFT_W }}>
+        <BrokerNode label="Release Post Inv." topicKey="RELEASE_POST_INV"
+          count={ev.release_after_investigation_event} accent={green} sm width={AFT_W}
+          tooltip="Release Post Inv. — terminal event for agent-cleared transactions. Stored to the DB without the suspicious flag." />
+      </div>
+
+      {/* Retain Post Investigation broker — mirrors Automated Retain */}
+      <div style={{ position: 'absolute', top: RETAFT_TOP, left: AFT_LEFT, width: AFT_W }}>
+        <BrokerNode label="Retain Post Inv." topicKey="RETAIN_POST_INV"
+          count={ev.agent_retain_event} accent={red} sm width={AFT_W}
+          tooltip="Retain Post Inv. — transactions the agent classified as non-compliant. Stored to the DB with the suspicious flag set." />
+      </div>
+
+      {/* ── Investigation Pipeline zone (dashed overlay around Investigator · Queue · Agent) ──
+          Rendered BEFORE the three elements below so they draw on top of the border.
+          Interior is transparent so SVG loop-back arrows remain visible through the zone.
+          Label uses width: fit-content so its white background doesn't hide arrows that pass through. */}
+      <div style={{
+        position: 'absolute',
+        left: INVFACT_LEFT - 14,
+        top: INV_ROW_TOP - 41,
+        width: (AGENT_RIGHT - INVFACT_LEFT) + 28,
+        height: H - (INV_ROW_TOP - 41) - 2,
+        border: '1px dashed var(--border-light)', borderRadius: 6,
+        padding: '8px 10px', boxSizing: 'border-box',
+        pointerEvents: 'none',
+      }}>
+        <div style={{
+          fontSize: 9, fontWeight: 700, color: 'var(--text-muted)',
+          textTransform: 'uppercase', letterSpacing: '0.08em',
+          textAlign: 'center',
+          background: '#fff', padding: '2px 8px',
+          width: 'fit-content', margin: '0 auto',
+        }}>
+          Investigation Pipeline
+        </div>
+      </div>
+
+      {/* Investigator Factory */}
+      <div style={{ position: 'absolute', top: INV_ROW_TOP, left: INVFACT_LEFT, width: INVFACT_W }}>
+        <FactoryNode icon="🕵️" label="Investigator Factory" description="IE filter · FIFO queue" sm width={INVFACT_W}
+          tooltip="Investigator Factory — filters Investigation Notifications for Ireland and enqueues them on the Investigation FIFO queue." />
+      </div>
+
+      {/* Investigation Queue — default gray palette (no accent override), matching
+          the factory family visually. sm variant keeps it the same height as the
+          surrounding factories so its center lands on Y_INV. */}
+      <div style={{ position: 'absolute', top: INV_ROW_TOP - 2, left: QUEUE_LEFT, width: QUEUE_W }}>
+        <QueueNode label="Investigation Queue" count={inv} sm
+          tooltip="Investigation Queue — delayed backlog of cases awaiting the VAT Agent. Depth > 0 indicates a backlog." />
+      </div>
+
+      {/* VAT Agent Worker */}
+      <div style={{ position: 'absolute', top: INV_ROW_TOP, left: AGENT_LEFT, width: AGENT_W }}>
+        <FactoryNode icon="🤖" label="VAT Agent Worker" description="LM Studio · fraud detection" sm width={AGENT_W}
+          tooltip="VAT Agent Worker — runs the local LLM (LM Studio) to produce a compliance verdict: incorrect / correct / uncertain." />
+      </div>
+
+      {/* Investigation Clearance broker */}
+      <div style={{ position: 'absolute', top: INV_ROW_TOP, left: CLRREL_LEFT, width: CLRREL_W }}>
+        <BrokerNode label="Investigation Clearance" topicKey="INVESTIGATION_CLEARANCE"
+          count={ev.agent_release_event} accent={green} sm width={CLRREL_W}
+          tooltip="Investigation Clearance — transactions the agent found compliant. Forwarded to the Post-Investigation Release factory." />
+      </div>
+
+      {/* Post-Investigation Release Factory */}
+      <div style={{ position: 'absolute', top: INV_ROW_TOP, left: POSTINV_LEFT, width: POSTINV_W }}>
+        <FactoryNode icon="🔓" label="Post-Inv. Release" description="agent-release + OV + arrival" sm width={POSTINV_W}
+          tooltip="Post-Investigation Release Factory — waits for OV + Arrival on cleared transactions, then emits a Release After Investigation event." />
+      </div>
+    </div>
+  )
+}
+
+// ── KPI strip ─────────────────────────────────────────────────────────────────
+
+function KpiStrip({ pipeline }) {
+  const ev = pipeline?.events || {}
+
+  // Ingested: entry to the pipeline
+  const ingested = ev.sales_order_event || 0
+
+  // Released: Automated Release + Release Post Inv. (both release paths)
+  const released = (ev.release_event                     || 0)
+                 + (ev.release_after_investigation_event || 0)
+
+  // Retained: Automated Retain + Retain Post Inv. (both retain paths)
+  const retained = (ev.retain_event      || 0)
+                 + (ev.agent_retain_event || 0)
+
+  // Investigated: investigations the agent has completed (produced a verdict for)
+  const investigated = (ev.agent_retain_event  || 0)
+                     + (ev.agent_release_event || 0)
+
+  // Under investigation: cumulative amber-routed minus completed = currently in-flight
+  // (in the FIFO queue or being processed by the VAT Agent Worker)
+  const underInvestigation = Math.max(
+    0,
+    (ev.investigate_event || 0) - investigated
+  )
+
+  const tiles = [
+    { key: 'ingested',     label: 'Ingested',           value: ingested,          color: 'var(--eu-blue)',
+      tooltip: 'Sales-order events fired by the simulation engine (entry to the pipeline).' },
+    { key: 'released',     label: 'Released',           value: released,          color: '#1f7a3c',
+      tooltip: 'Automated Release + Release Post Inv. — total transactions cleared for release (both automated and post-investigation).' },
+    { key: 'retained',     label: 'Retained',           value: retained,          color: '#c0392b',
+      tooltip: 'Automated Retain + Retain Post Inv. — total transactions flagged as suspicious and retained (both automated and post-investigation).' },
+    { key: 'investigated', label: 'Investigated',       value: investigated,      color: '#e6820a',
+      tooltip: 'Investigations the VAT Agent has completed (produced a verdict: correct, uncertain, or incorrect).' },
+    { key: 'underInv',     label: 'Under Investigation', value: underInvestigation, color: '#9c27b0',
+      tooltip: 'Transactions currently in the investigation pipeline — waiting in the FIFO queue or being analysed by the VAT Agent Worker.' },
+  ]
+
+  return (
+    <div className="card section-gap">
+      <div className="card-header">Pipeline KPIs</div>
+      <div style={{ padding: '14px 20px', display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        {tiles.map((t) => (
+          <div key={t.key} title={t.tooltip} style={{
+            flex: '1 1 140px', minWidth: 140,
+            background: t.color + '10', border: `1.5px solid ${t.color}55`,
+            borderRadius: 'var(--radius)', padding: '10px 14px',
+            cursor: 'help',
+          }}>
+            <div style={{
+              fontSize: 10, color: t.color, fontWeight: 700,
+              textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4,
+            }}>{t.label}</div>
+            <div style={{
+              fontSize: 24, fontWeight: 700, color: t.color, lineHeight: 1,
+            }}>{fmt(t.value)}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 // ── Pipeline Diagram ──────────────────────────────────────────────────────────
 
 function PipelineDiagram({ pipeline }) {
@@ -333,11 +780,33 @@ function PipelineDiagram({ pipeline }) {
   const stored = pipeline?.stored_count        ?? null
 
   // Row 1: three parallel processing zones
-  const OV_H = 76, RT_H = 190, AN_H = 76, LGAP = 10
-  const ROW1_H = OV_H + LGAP + RT_H + LGAP + AN_H   // 428
-  const yOV = OV_H / 2                               // 38
-  const yRT = OV_H + LGAP + RT_H / 2                 // 181
-  const yAN = OV_H + LGAP + RT_H + LGAP + AN_H / 2  // 323
+  const OV_H = 94, RT_H = 230, AN_H = 94, LGAP = 10
+  const ROW1_H = OV_H + LGAP + RT_H + LGAP + AN_H
+  const yOV = OV_H / 2
+  const yRT = OV_H + LGAP + RT_H / 2
+  const yAN = OV_H + LGAP + RT_H + LGAP + AN_H / 2
+
+  // Shared width for the three top zones so OV and Transport match the RT zone
+  const ZONE_W = 440
+  // Shared width for OV and Transport factories (so they match each other)
+  const SIDE_FACTORY_W = 220
+  // Shared width for the three row-1 output brokers (OV / RT Score / Arrival Notification)
+  const OUT_BROKER_W = 170
+
+  // RT zone internal row geometry (two stacked broker rows + fan-in to consolidation)
+  const RT_ROW_H   = 84
+  const RT_ROW_GAP = 10
+  const RT_STACK_H = RT_ROW_H * 2 + RT_ROW_GAP    // 178
+  const rtTopY     = RT_ROW_H / 2                  // 42  — center of row 1
+  const rtBotY     = RT_ROW_H + RT_ROW_GAP + RT_ROW_H / 2  // 136 — center of row 2
+  const rtOutY     = RT_STACK_H / 2                // 89  — fan-in output
+
+  // Terminal-event sum = number of transactions stored to the DB since reset
+  const newStored =
+    (ev.release_event                     || 0) +
+    (ev.retain_event                      || 0) +
+    (ev.agent_retain_event                || 0) +
+    (ev.release_after_investigation_event || 0)
 
   // Row 2: three event broker rows
   const EROW = 86, EGAP = 14
@@ -350,13 +819,17 @@ function PipelineDiagram({ pipeline }) {
     <div className="card section-gap">
       <div className="card-header">
         Pipeline Flow
-        <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 400 }}>auto-refresh every 3 s</span>
+        <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 400 }}>live stream · ~5 Hz</span>
       </div>
 
-      <div style={{ overflowX: 'auto', padding: '20px 20px 4px' }}>
-        <div style={{ minWidth: 'max-content' }}>
+      <div className="pipeline-scroll" style={{
+        overflowX: 'auto', overflowY: 'hidden',
+        padding: '20px 20px 20px',
+        borderBottom: '1px solid var(--border-light)',
+      }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 'max-content' }}>
 
-          {/* ══ ROW 1: Entry → 3 parallel zones → 3 output brokers ══ */}
+          {/* ══ MAIN FLOW — single horizontal row: Entry → zones → brokers → Release Factory → event brokers → DB Store ══ */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
 
             {/* Entry Broker */}
@@ -372,51 +845,63 @@ function PipelineDiagram({ pipeline }) {
               { y: yAN, color: '#e67e22', dashed: true  },
             ]} />
 
-            {/* Three parallel zones stacked */}
+            {/* Three parallel zones stacked — all at ZONE_W so Row 1 is visually aligned */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
 
               <div style={{ height: OV_H, display: 'flex', alignItems: 'center' }}>
-                <Zone label="Order Validation">
-                  <FactoryNode icon="✅" label="Order Validation" description="3–5 s · unlimited" sm />
+                <Zone label="Order Validation" style={{ width: ZONE_W, boxSizing: 'border-box' }}>
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center' }}>
+                    <FactoryNode icon="✅" label="Order Validation"
+                      description="3–5 s · unlimited concurrency" sm width={SIDE_FACTORY_W}
+                      tooltip="Order Validation Factory — async per-order task with uniform 3–5 s delay. Emits ORDER_VALIDATION events." />
+                  </div>
                 </Zone>
               </div>
 
               <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
-                <Zone label="RT Risk Monitoring" style={{ height: '100%', boxSizing: 'border-box' }}>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <FactoryNode icon="⚖️" label="RT Risk Mon. 1" description="VAT ratio deviation" sm />
-                      <Arrow />
-                      <BrokerNode label="RT Risk 1 Outcome" topicKey="RT_RISK_1_OUTCOME"
-                        count={ev.rt_risk_1_outcome} queueSize={q.rt_risk_1_outcome} sm>
-                        <FlaggedBadge flagged={rf.rt_risk_1_flagged} total={ev.rt_risk_1_outcome} />
-                      </BrokerNode>
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <FactoryNode icon="🔍" label="RT Risk Mon. 2" description="Watchlist lookup" sm />
-                      <Arrow />
-                      <BrokerNode label="RT Risk 2 Outcome" topicKey="RT_RISK_2_OUTCOME"
-                        count={ev.rt_risk_2_outcome} queueSize={q.rt_risk_2_outcome} sm>
-                        <FlaggedBadge flagged={rf.rt_risk_2_flagged} total={ev.rt_risk_2_outcome} />
-                      </BrokerNode>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 4 }}>
-                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
-                        <svg width={64} height={18}>
-                          <line x1={14} y1={0} x2={32} y2={14} stroke="#adb5bd" strokeWidth={1.5} />
-                          <line x1={50} y1={0} x2={32} y2={14} stroke="#adb5bd" strokeWidth={1.5} />
-                          <polygon points="28,12 36,12 32,18" fill="#adb5bd" />
-                        </svg>
-                        <FactoryNode icon="🔄" label="RT Consolidation" description="GREEN / AMBER / RED" sm />
+                <Zone label="RT Risk Monitoring" style={{ width: ZONE_W, height: '100%', boxSizing: 'border-box' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 0, height: '100%', justifyContent: 'flex-end' }}>
+                    {/* Entry fan-out — mirrors the fan-in on the right */}
+                    <FanOutSVG height={RT_STACK_H} targetYs={[rtTopY, rtBotY]} width={24} />
+                    {/* Stacked RT1 + RT2 rows */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: RT_ROW_GAP }}>
+                      <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <FactoryNode icon="⚖️" label="RT Risk Mon. 1" description="VAT ratio deviation" sm
+                          tooltip="RT Risk Monitor 1 — flags transactions whose VAT-to-value ratio deviates from the supplier's historical baseline." />
+                        <Arrow />
+                        <BrokerNode label="RT Risk 1 Outcome" topicKey="RT_RISK_1_OUTCOME"
+                          count={ev.rt_risk_1_outcome} sm
+                          tooltip="RT_RISK_1_OUTCOME — one event per transaction with the VAT-ratio flag result.">
+                          <FlaggedBadge flagged={rf.rt_risk_1_flagged} total={ev.rt_risk_1_outcome} />
+                        </BrokerNode>
+                      </div>
+                      <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <FactoryNode icon="🔍" label="RT Risk Mon. 2" description="Watchlist lookup" sm
+                          tooltip="RT Risk Monitor 2 — flags transactions whose seller or route appears on the active watchlist." />
+                        <Arrow />
+                        <BrokerNode label="RT Risk 2 Outcome" topicKey="RT_RISK_2_OUTCOME"
+                          count={ev.rt_risk_2_outcome} sm
+                          tooltip="RT_RISK_2_OUTCOME — one event per transaction with the watchlist lookup result.">
+                          <FlaggedBadge flagged={rf.rt_risk_2_flagged} total={ev.rt_risk_2_outcome} />
+                        </BrokerNode>
                       </div>
                     </div>
+                    {/* FanIn: 2 rows → RT Consolidation */}
+                    <FanInSVG height={RT_STACK_H} inputYs={[rtTopY, rtBotY]} outputY={rtOutY} width={36} />
+                    {/* RT Consolidation — horizontally to the right of the two monitoring rows */}
+                    <FactoryNode icon="🔄" label="RT Consolidation" description="GREEN / AMBER / RED" sm
+                      tooltip="RT Consolidation — combines RT1 + RT2 into a single risk score: GREEN (none flagged), AMBER (one), RED (both)." />
                   </div>
                 </Zone>
               </div>
 
               <div style={{ height: AN_H, display: 'flex', alignItems: 'center' }}>
-                <Zone label="Transport">
-                  <FactoryNode icon="🚢" label="Transport" description="exp. ~60 s · unlimited" accent="#e67e22" sm />
+                <Zone label="Transport" style={{ width: ZONE_W, boxSizing: 'border-box' }}>
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center' }}>
+                    <FactoryNode icon="🚢" label="Transport"
+                      description="exp. delay ~60 s · unlimited concurrency" sm width={SIDE_FACTORY_W}
+                      tooltip="Transport / Arrival Notification — async per-order task with exponential-delay arrival (~60 s mean). Emits ARRIVAL_NOTIFICATION events." />
+                  </div>
                 </Zone>
               </div>
 
@@ -426,168 +911,93 @@ function PipelineDiagram({ pipeline }) {
             <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
               <div style={{ height: OV_H,  display: 'flex', alignItems: 'center' }}><Arrow /></div>
               <div style={{ height: RT_H,  display: 'flex', alignItems: 'center' }}><Arrow /></div>
-              <div style={{ height: AN_H,  display: 'flex', alignItems: 'center' }}><Arrow color="#e67e22" /></div>
+              <div style={{ height: AN_H,  display: 'flex', alignItems: 'center' }}><Arrow /></div>
             </div>
 
-            {/* Three output brokers — vertically aligned */}
+            {/* Three output brokers — same width, same default blue */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
               <div style={{ height: OV_H, display: 'flex', alignItems: 'center' }}>
                 <BrokerNode label="Order Validation" topicKey="ORDER_VALIDATION"
-                  count={ev.order_validation} queueSize={q.order_validation} sm />
+                  count={ev.order_validation} sm width={OUT_BROKER_W}
+                  tooltip="ORDER_VALIDATION — field-completeness outcome per order. Consumed by the Release Factory." />
               </div>
               <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
                 <BrokerNode label="RT Score" topicKey="RT_SCORE"
-                  count={ev.rt_score} queueSize={q.rt_score} sm>
+                  count={ev.rt_score} sm width={OUT_BROKER_W}
+                  tooltip="RT_SCORE — consolidated GREEN / AMBER / RED risk score per transaction. Consumed by the Release Factory.">
                   <ScoreBadges green={rf.rt_score_green} amber={rf.rt_score_amber} red={rf.rt_score_red} />
                 </BrokerNode>
               </div>
               <div style={{ height: AN_H, display: 'flex', alignItems: 'center' }}>
                 <BrokerNode label="Arrival Notification" topicKey="ARRIVAL_NOTIFICATION"
-                  count={ev.arrival_notification} queueSize={q.arrival_notification} accent="#e67e22" sm />
+                  count={ev.arrival_notification} sm width={OUT_BROKER_W}
+                  tooltip="ARRIVAL_NOTIFICATION — emitted once goods arrive at destination. Required by the Release Factory." />
               </div>
             </div>
+
+            {/* Fan-in: 3 output brokers → Release Factory */}
+            <FanInSVG height={ROW1_H} inputYs={[yOV, yRT, yAN]} outputY={ROW1_H / 2} width={60} />
+
+            {/* Release Factory — vertically centered at ROW1_H/2 to line up with the fan-in output */}
+            <div style={{ height: ROW1_H, display: 'flex', alignItems: 'center' }}>
+              <FactoryNode icon="🎯" label="Release Factory" description="routes by score + validation" sm
+                tooltip="Release Factory — waits for RT Score + Order Validation + Arrival Notification on each transaction, then routes: GREEN→Release, RED→Retain, AMBER→Investigate." />
+            </div>
+
+            {/* Fan-out: Release Factory → 3 event brokers.
+                Target Ys match row-1 output brokers (yOV, yRT, yAN) so vertical spacing is consistent. */}
+            <FanOutSVG height={ROW1_H} targetYs={[yOV, yRT, yAN]} width={48} />
+
+            {/* Three event brokers — heights match row-1 zones so centers land at yOV / yRT / yAN */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
+              <div style={{ height: OV_H, display: 'flex', alignItems: 'center' }}>
+                <BrokerNode label="Automated Release" topicKey="AUTOMATED_RELEASE"
+                  count={ev.release_event} accent="#1f7a3c" sm width={OUT_BROKER_W}
+                  tooltip="Automated Release — GREEN-path transactions cleared for storage without further investigation." />
+              </div>
+              <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
+                <BrokerNode label="Automated Retain" topicKey="AUTOMATED_RETAIN"
+                  count={ev.retain_event} accent="#c0392b" sm width={OUT_BROKER_W}
+                  tooltip="Automated Retain — RED-path transactions stored with the suspicious flag set." />
+              </div>
+              <div style={{ height: AN_H, display: 'flex', alignItems: 'center' }}>
+                <BrokerNode label="Investigation Notification" topicKey="INVESTIGATION_NOTIFICATION"
+                  count={ev.investigate_event} accent="#e6820a" sm width={OUT_BROKER_W}
+                  tooltip="Investigation Notification — AMBER-path transactions handed off to the investigation sub-pipeline." />
+              </div>
+            </div>
+
+            {/* Middle section: DB Store Factory + Hub (grouped in a dashed zone) + After-Inv brokers
+                (mirroring event brokers) + inline investigation pipeline along the bottom.
+                Absolute-positioned canvas sized to ROW1_H; Y coordinates locked to yOV/yRT/yAN from the parent. */}
+            <MiddleSection ev={ev} rf={rf} inv={inv} stored={stored} newStored={newStored}
+              H={ROW1_H} yRel={yOV} yRet={yRT} yInv={yAN} />
 
           </div>
 
-          {/* ── Row connector ── */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', color: 'var(--text-muted)', fontSize: 9 }}>
-            <div style={{ flex: 1, height: 1, background: 'var(--border-light)' }} />
-            <span style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>OV · RT Score · Arrival Notification ↓ Release Factory</span>
-            <div style={{ flex: 1, height: 1, background: 'var(--border-light)' }} />
-          </div>
-
-          {/* ══ ROW 2: Release Factory → 3 event brokers → DB Store ══ */}
-          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 0 }}>
-
-            {/* Release Factory */}
-            <Zone label="Release Factory" style={{ height: ROW2_H, boxSizing: 'border-box', display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center' }}>
-              <FactoryNode icon="🎯" label="Release Factory" description="routes by score + validation" sm />
-            </Zone>
-
-            {/* FanOut → 3 event brokers */}
-            <FanOutSVG height={ROW2_H} targetYs={[ryG, ryR, ryA]} width={48} />
-
-            {/* Three event brokers */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: EGAP }}>
-              <div style={{ height: EROW, display: 'flex', alignItems: 'center' }}>
-                <BrokerNode label="Release Event" topicKey="RELEASE_EVENT"
-                  count={ev.release_event} queueSize={q.release_event} accent="#1f7a3c" sm />
-              </div>
-              <div style={{ height: EROW, display: 'flex', alignItems: 'center' }}>
-                <BrokerNode label="Retain Event" topicKey="RETAIN_EVENT"
-                  count={ev.retain_event} queueSize={q.retain_event} accent="#c0392b" sm />
-              </div>
-              <div style={{ height: EROW, display: 'flex', alignItems: 'center' }}>
-                <BrokerNode label="Investigate Event" topicKey="INVESTIGATE_EVENT"
-                  count={ev.investigate_event} queueSize={q.investigate_event} accent="#e6820a" sm />
-              </div>
-            </div>
-
-            {/* Right section: long arrows for Release+Retain → DB Store; short for Investigate */}
-            <div style={{
-              display: 'grid',
-              gridTemplateColumns: '160px auto',
-              gridTemplateRows: `${EROW}px ${EROW}px ${EROW}px`,
-              rowGap: `${EGAP}px`,
-            }}>
-              {/* Row 1 col 1: Release long arrow */}
-              <div style={{ gridRow: 1, gridColumn: 1, display: 'flex', alignItems: 'center' }}>
-                <LongArrow color="#1f7a3c" width={160} />
-              </div>
-              {/* Row 1-2 col 2: DB Store Factory + sink (spans Release + Retain rows) */}
-              <div style={{ gridRow: '1 / 3', gridColumn: 2, display: 'flex', alignItems: 'center' }}>
-                <Zone label="Sink">
-                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
-                    <FactoryNode icon="💾" label="DB Store Factory" description="Insert + flag suspicious" sm />
-                    <Arrow down />
-                    <DBSinkNode count={stored} />
-                  </div>
-                </Zone>
-              </div>
-              {/* Row 2 col 1: Retain long arrow */}
-              <div style={{ gridRow: 2, gridColumn: 1, display: 'flex', alignItems: 'center' }}>
-                <LongArrow color="#c0392b" width={160} />
-              </div>
-              {/* Row 3 col 1-2: Investigate short arrow + label */}
-              <div style={{ gridRow: 3, gridColumn: '1 / 3', display: 'flex', alignItems: 'center', gap: 8 }}>
-                <Arrow color="#e6820a" />
-                <div style={{ fontSize: 9, color: '#e6820a', fontWeight: 700, border: '1px dashed #e6820a', borderRadius: 4, padding: '2px 6px', whiteSpace: 'nowrap' }}>
-                  ↓ investigation pipeline (below)
-                </div>
-              </div>
-            </div>
-
-          </div>
-
-        </div>
-      </div>
-
-      {/* ── INVESTIGATION SUB-PIPELINE ── */}
-      <div style={{ margin: '4px 20px 4px', padding: '12px 14px', background: '#fdf6ff', border: '1.5px solid #9c27b066', borderRadius: 8 }}>
-        <div style={{ fontSize: 10, fontWeight: 700, color: '#7b1fa2', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10 }}>
-          Investigation Sub-Pipeline — from Investigate Event broker (AMBER / Ireland)
-        </div>
-        <div style={{ overflowX: 'auto' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 0, minWidth: 'max-content' }}>
-
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', marginRight: 6 }}>
-              <div style={{ fontSize: 9, color: '#e6820a', fontWeight: 700, border: '1px dashed #e6820a', borderRadius: 4, padding: '2px 6px', whiteSpace: 'nowrap' }}>
-                INVESTIGATE_EVENT
-              </div>
-              <Arrow color="#e6820a" />
-            </div>
-
-            <FactoryNode icon="🕵️" label="Investigator Factory" description="IE filter · FIFO queue" accent="#9c27b0" sm />
-            <Arrow color="#9c27b0" />
-            <QueueNode label="Investigation Queue" count={inv} accent="#9c27b0" />
-            <Arrow color="#9c27b0" />
-            <FactoryNode icon="🤖" label="VAT Agent Worker" description="LM Studio · fraud detection" accent="#9c27b0" sm />
-
-            {/* Fork: retain vs release */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginLeft: 6 }}>
-
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <Arrow color="#c0392b" label="incorrect" />
-                <BrokerNode label="Retained after Inv." topicKey="AGENT_RETAIN_EVENT"
-                  count={ev.agent_retain_event} queueSize={q.agent_retain_event} accent="#c0392b" sm />
-                <LongArrow color="#c0392b" width={120} />
-                <div style={{ fontSize: 9, color: '#c0392b', fontWeight: 700, border: '1px dashed #c0392b', borderRadius: 4, padding: '2px 6px', whiteSpace: 'nowrap' }}>
-                  → DB Store Factory
-                </div>
-              </div>
-
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <Arrow color="#1f7a3c" label="correct/uncertain" />
-                <BrokerNode label="To Be Released after Inv." topicKey="AGENT_RELEASE_EVENT"
-                  count={ev.agent_release_event} queueSize={q.agent_release_event} accent="#1f7a3c" sm />
-                <Arrow color="#1f7a3c" />
-                <FactoryNode icon="🔓" label="Release After Inv. Factory" description="agent-release + OV + arrival" accent="#1f7a3c" sm />
-                <Arrow color="#1f7a3c" />
-                <BrokerNode label="Release After Investigation" topicKey="RELEASE_AFTER_INVESTIGATION_EVENT"
-                  count={ev.release_after_investigation_event}
-                  queueSize={q.release_after_investigation_event} accent="#1f7a3c" sm />
-                <Arrow color="#1f7a3c" />
-                <div style={{ fontSize: 9, color: '#1f7a3c', fontWeight: 700, border: '1px dashed #1f7a3c', borderRadius: 4, padding: '2px 6px', whiteSpace: 'nowrap' }}>
-                  → DB Store Factory
-                </div>
-              </div>
-
-            </div>
-          </div>
         </div>
       </div>
 
       {/* Legend */}
       <div style={{ padding: '10px 20px 16px', display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center', borderTop: '1px solid var(--border-light)' }}>
         <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)' }}>Legend:</span>
+
+        {/* Element types */}
         <LegendItem color="var(--eu-blue)" bg="var(--eu-blue-light)" label="Broker" />
-        <LegendItem color="var(--border)" bg="#f8f9fa" label="Factory" />
-        <LegendItem color="#1f7a3c" bg="#e8f5e9" label="GREEN — release" />
-        <LegendItem color="#c0392b" bg="#fde8e8" label="RED — retain" />
-        <LegendItem color="#e6820a" bg="#fff3e0" label="AMBER — investigate" />
-        <LegendItem color="#9c27b0" bg="#fdf6ff" label="Investigation pipeline" />
-        <LegendItem color="#e67e22" bg="#fff8f0" label="Transport / Arrival (dashed)" dashed />
+        <LegendItem color="#868e96" bg="#f8f9fa" label="Factory" />
+        <LegendItem color="#868e96" bg="#eceff1" label="Queue (FIFO)" dashed />
+        <LegendItem color="#0284c7" bg="#e0f2fe" label="Custom Data Hub (MongoDB)" />
+        <LegendItem color="var(--text-muted)" bg="#ffffff" label="Processing zone" dashed />
+
+        {/* Sub-box / arrow color coding */}
+        <LegendItem color="#1f7a3c" bg="#e8f5e9" label="Release (automated + post inv.)" />
+        <LegendItem color="#c0392b" bg="#fde8e8" label="Retain (automated + post inv.)" />
+        <LegendItem color="#e6820a" bg="#fff3e0" label="Investigation notification" />
+        <LegendItem color="#9c27b0" bg="#fdf6ff" label="Investigation flow" />
+        <LegendItem color="#e67e22" bg="#fff8f0" label="Transport / Arrival" dashed />
+
         <div style={{ marginLeft: 8, fontSize: 11, color: 'var(--text-muted)' }}>
+          Brokers all share the blue outer border — the inner sub-box carries the differentiating color.
           Counts reflect JSON events persisted to <code>data/events/</code> since last reset.
         </div>
       </div>
@@ -616,12 +1026,12 @@ const TOPIC_META = [
   { key: 'rt_risk_2_outcome',                   label: 'RT Risk 2 Outcome',                factory: 'RT Risk Monitoring 2',               color: '#6f42c1' },
   { key: 'rt_score',                            label: 'RT Score',                         factory: 'RT Consolidation Factory',            color: '#e6820a' },
   { key: 'arrival_notification',                label: 'Arrival Notification',             factory: 'Arrival Notification Factory',        color: '#e67e22' },
-  { key: 'release_event',                       label: 'Release Event',                    factory: 'Release Factory (GREEN)',             color: '#1f7a3c' },
-  { key: 'retain_event',                        label: 'Retain Event',                     factory: 'Retain Factory (RED)',                color: '#c0392b' },
-  { key: 'investigate_event',                   label: 'Investigate Event',                factory: 'Investigate Dispatch Factory (AMBER)', color: '#e6820a' },
-  { key: 'agent_retain_event',                  label: 'Retained after Investigation',     factory: 'Investigation Agent Worker',          color: '#c0392b' },
-  { key: 'agent_release_event',                 label: 'To Be Released after Investigation', factory: 'Investigation Agent Worker',        color: '#1f7a3c' },
-  { key: 'release_after_investigation_event',   label: 'Release after Investigation',      factory: 'Release After Investigation Factory', color: '#2e7d32' },
+  { key: 'release_event',                       label: 'Automated Release',                factory: 'Release Factory (GREEN)',             color: '#1f7a3c' },
+  { key: 'retain_event',                        label: 'Automated Retain',                 factory: 'Retain Factory (RED)',                color: '#c0392b' },
+  { key: 'investigate_event',                   label: 'Investigation Notification',       factory: 'Investigate Dispatch Factory (AMBER)', color: '#e6820a' },
+  { key: 'agent_retain_event',                  label: 'Retain Post Inv.',                 factory: 'Investigation Agent Worker',          color: '#c0392b' },
+  { key: 'agent_release_event',                 label: 'Investigation Clearance',          factory: 'Investigation Agent Worker',          color: '#1f7a3c' },
+  { key: 'release_after_investigation_event',   label: 'Release Post Inv.',                factory: 'Release After Investigation Factory', color: '#2e7d32' },
 ]
 
 function EventCountsTable({ pipeline }) {
@@ -697,20 +1107,44 @@ export default function SimulationPage() {
   const [status,   setStatus]   = useState(null)
   const [pipeline, setPipeline] = useState(null)
 
+  // One-shot REST refreshes — used as a fallback when the stream is unavailable,
+  // and wired into the SimControls onRefresh so control actions feel instant.
   const refreshStatus   = useCallback(async () => { try { setStatus(await getSimStatus()) } catch {} }, [])
   const refreshPipeline = useCallback(async () => { try { setPipeline(await getPipelineStats()) } catch {} }, [])
 
+  // Open the SSE stream once on mount. The backend pushes a consolidated
+  // { status, pipeline } snapshot at ~5 Hz, giving us smooth event-by-event UI
+  // updates without polling. A slow 15 s REST safety-net poll covers the rare
+  // case where the stream drops (e.g. backend restart).
   useEffect(() => {
+    // Initial REST fetch so the page paints immediately rather than waiting for
+    // the first SSE frame.
     refreshStatus()
-    const id = setInterval(refreshStatus, 2000)
-    return () => clearInterval(id)
-  }, [refreshStatus])
-
-  useEffect(() => {
     refreshPipeline()
-    const id = setInterval(refreshPipeline, 3000)
-    return () => clearInterval(id)
-  }, [refreshPipeline])
+
+    const es = openSimStateStream(
+      (snap) => {
+        if (snap?.status)   setStatus(snap.status)
+        if (snap?.pipeline) setPipeline(snap.pipeline)
+      },
+      () => {
+        // Connection error — EventSource will auto-reconnect. Do nothing here;
+        // the safety-net interval below will keep the UI fresh meanwhile.
+      }
+    )
+
+    const safetyId = setInterval(() => {
+      // Only polls if the stream isn't delivering — acts as a last-resort
+      // backstop. At 15 s it has negligible load impact.
+      refreshStatus()
+      refreshPipeline()
+    }, 15000)
+
+    return () => {
+      es.close()
+      clearInterval(safetyId)
+    }
+  }, [refreshStatus, refreshPipeline])
 
   return (
     <div className="page-container">
@@ -720,6 +1154,7 @@ export default function SimulationPage() {
       </div>
 
       <SimControls status={status} onRefresh={() => { refreshStatus(); refreshPipeline() }} />
+      <KpiStrip pipeline={pipeline} />
       <PipelineDiagram pipeline={pipeline} status={status} />
       <EventCountsTable pipeline={pipeline} />
     </div>

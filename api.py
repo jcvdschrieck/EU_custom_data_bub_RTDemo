@@ -136,7 +136,8 @@ from lib.catalog import SUPPLIERS, COUNTRY_NAMES
 _live_queue:          deque[dict]        = deque(maxlen=QUEUE_SIZE)
 _live_alarms:         list[dict]         = []
 _agent_processing:    dict[str, dict]    = {}   # tx_id → snapshot while analysing
-_sse_queues:          set[asyncio.Queue] = set()
+_sse_queues:          set[asyncio.Queue] = set()   # live-transaction stream subscribers
+_sim_state_sse:       set[asyncio.Queue] = set()   # pipeline + status stream subscribers
 _agent_queue:         asyncio.Queue | None = None  # manual POST /api/agent/analyse
 _investigation_queue: asyncio.Queue | None = None  # automatic investigation pipeline
 
@@ -860,6 +861,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_release_after_investigation_factory())
     asyncio.create_task(_db_store_worker())
     asyncio.create_task(_agent_worker())
+    asyncio.create_task(_sim_state_broadcaster())
 
     yield
 
@@ -914,6 +916,115 @@ async def queue_stream(request: Request):
                     yield ": heartbeat\n\n"
         finally:
             _sse_queues.discard(q)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ── Simulation state stream (pushed to the Simulation page — replaces polling) ─
+
+def _compute_sim_state_snapshot() -> dict:
+    """Full sim status + pipeline snapshot in a single JSON-serialisable dict.
+
+    Consumers (the SSE broadcaster below) use this to push a consolidated
+    state update to the Simulation page several times per second, so the UI
+    can render smooth event-by-event progress instead of polling every 2-3 s.
+    """
+    from lib.event_store import event_count, count_field_value
+    from lib.broker import broker as _broker
+
+    # ── Status block (same shape as GET /api/simulation/status) ──
+    counts = get_sim_counts()
+    s = state.to_dict()
+    s.update(counts)
+    s["active_alarms"]           = len(get_alarms(active_only=True))
+    s["agent_queue_len"]         = _agent_queue.qsize() if _agent_queue else 0
+    s["investigation_queue_len"] = _investigation_queue.qsize() if _investigation_queue else 0
+    s["agent_processing"]        = len(_agent_processing)
+
+    # ── Pipeline block (same shape as GET /api/simulation/pipeline) ──
+    topics = [
+        SALES_ORDER_EVENT, RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME,
+        RT_SCORE, ORDER_VALIDATION, ARRIVAL_NOTIFICATION,
+        RELEASE_EVENT, RETAIN_EVENT, INVESTIGATE_EVENT,
+        AGENT_RETAIN_EVENT, AGENT_RELEASE_EVENT, RELEASE_AFTER_INVESTIGATION_EVENT,
+    ]
+    pipeline = {
+        "events":             {t: event_count(t) for t in topics},
+        "queues":             {t: _broker.qsize(t) for t in topics},
+        "stored_count":       get_transaction_count(),
+        "investigation_queue": _investigation_queue.qsize() if _investigation_queue else 0,
+        "risk_flags": {
+            "rt_risk_1_flagged": count_field_value(RT_RISK_1_OUTCOME, "outcome.flagged", True),
+            "rt_risk_2_flagged": count_field_value(RT_RISK_2_OUTCOME, "outcome.flagged", True),
+            "rt_score_green":    count_field_value(RT_SCORE, "outcome.risk_score", "green"),
+            "rt_score_amber":    count_field_value(RT_SCORE, "outcome.risk_score", "amber"),
+            "rt_score_red":      count_field_value(RT_SCORE, "outcome.risk_score", "red"),
+        },
+    }
+
+    return {"status": s, "pipeline": pipeline}
+
+
+async def _sim_state_broadcaster() -> None:
+    """Push a sim-state snapshot to every connected SSE subscriber at ~5 Hz.
+
+    Replaces the frontend's 2 s / 3 s setInterval polling so the UI reflects
+    events (sim_time, fired_count, per-topic counters) as they happen, not in
+    2–3-second batches. Only runs if there's at least one subscriber to avoid
+    reading the event store filesystem when no one is listening.
+    """
+    while True:
+        await asyncio.sleep(0.2)
+        if not _sim_state_sse:
+            continue
+        try:
+            snapshot = _compute_sim_state_snapshot()
+            payload  = _json.dumps(snapshot)
+        except Exception:
+            continue
+        dead = set()
+        for q in _sim_state_sse:
+            try:
+                q.put_nowait(payload)
+            except asyncio.QueueFull:
+                # Subscriber can't keep up — drop this frame; next one will follow.
+                pass
+            except Exception:
+                dead.add(q)
+        _sim_state_sse.difference_update(dead)
+
+
+@app.get("/api/simulation/stream")
+async def simulation_stream(request: Request):
+    """SSE stream carrying consolidated sim status + pipeline state."""
+    q: asyncio.Queue = asyncio.Queue(maxsize=20)
+    _sim_state_sse.add(q)
+
+    # Snapshot the current state immediately so reconnects / fresh subscribers
+    # get a full frame without waiting up to 200 ms for the broadcaster tick.
+    try:
+        initial = _json.dumps(_compute_sim_state_snapshot())
+    except Exception:
+        initial = None
+
+    async def event_generator():
+        try:
+            if initial is not None:
+                yield f"data: {initial}\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    payload = await asyncio.wait_for(q.get(), timeout=15.0)
+                    yield f"data: {payload}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": heartbeat\n\n"
+        finally:
+            _sim_state_sse.discard(q)
 
     return StreamingResponse(
         event_generator(),
