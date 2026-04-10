@@ -1315,9 +1315,32 @@ export default function SimulationPage() {
 
   return (
     <div className="page-container">
-      <div className="page-title">Simulation</div>
-      <div className="page-subtitle">
-        Control the simulation and monitor the pub/sub pipeline in real time
+      {/* Title row — flex so the Revenue Guardian launcher can sit on the
+          far right while the title + subtitle stay left-aligned. */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16 }}>
+        <div>
+          <div className="page-title">Simulation</div>
+          <div className="page-subtitle">
+            Control the simulation and monitor the pub/sub pipeline in real time
+          </div>
+        </div>
+        <a
+          href="http://localhost:8080"
+          target="_blank"
+          rel="noopener noreferrer"
+          title="Open the Revenue Guardian operator console (port 8080) in a new tab"
+          style={{
+            display: 'inline-flex', alignItems: 'center', gap: 6,
+            background: '#6366f1', color: '#fff',
+            border: 'none', borderRadius: 'var(--radius)',
+            padding: '8px 14px', fontSize: 12, fontWeight: 700,
+            textDecoration: 'none', whiteSpace: 'nowrap',
+            boxShadow: '0 1px 4px rgba(99, 102, 241, 0.25)',
+            cursor: 'pointer', flex: '0 0 auto',
+          }}>
+          🧑‍💼 Open Revenue Guardian
+          <span style={{ fontSize: 11, opacity: 0.85 }}>↗</span>
+        </a>
       </div>
 
       <SimControls status={status} onRefresh={() => { refreshStatus(); refreshPipeline() }} />
