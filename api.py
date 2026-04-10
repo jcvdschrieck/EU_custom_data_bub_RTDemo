@@ -205,8 +205,12 @@ async def _sleep_until_sim_time(target_dt: datetime) -> None:
     rather than wall-clock time (Order Validation, Arrival Notification, …).
     """
     from lib.simulator import state as _state
+    # 100 ms polling slice (was 50 ms). Halves the CPU spent polling per
+    # in-flight factory task — meaningful when ~1500 tasks are queued during
+    # heavy demos under screen-share encoding load. Visible latency on event
+    # firing remains imperceptible at this scale (max ~100 ms drift).
     while _state.sim_time < target_dt:
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.1)
 
 
 # ── Simulation: publish to Sales-order Event Broker ──────────────────────────
@@ -1163,15 +1167,20 @@ def _compute_sim_state_snapshot() -> dict:
 
 
 async def _sim_state_broadcaster() -> None:
-    """Push a sim-state snapshot to every connected SSE subscriber at ~5 Hz.
+    """Push a sim-state snapshot to every connected SSE subscriber at ~2 Hz.
 
     Replaces the frontend's 2 s / 3 s setInterval polling so the UI reflects
     events (sim_time, fired_count, per-topic counters) as they happen, not in
     2–3-second batches. Only runs if there's at least one subscriber to avoid
     reading the event store filesystem when no one is listening.
+
+    500 ms cadence (was 200 ms) — fewer React re-renders of the pipeline
+    diagram, meaningful CPU savings during demos under screen-share load.
+    The simulation clock is still buttery-smooth at ×1 because each push
+    advances sim_time by 500 ms, well within human perception.
     """
     while True:
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.5)
         if not _sim_state_sse:
             continue
         try:
