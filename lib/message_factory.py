@@ -62,6 +62,10 @@ _INTERNAL_FLAT_FIELDS = frozenset({
     "seller_country", "buyer_country", "value", "vat_rate", "vat_amount",
     "correct_vat_rate", "has_error", "item_category", "item_description",
     "xml_message", "created_at", "fired", "sales_order_id",
+    # Producer fields propagated for in-memory workers; the producer info
+    # also lives in the schema-conforming Seller block on the line item,
+    # so the on-disk JSON gets it through that path.
+    "producer_id", "producer_name", "producer_country", "producer_city",
 })
 
 
@@ -88,7 +92,9 @@ def build_sales_order_event(row: dict) -> dict:
     Convert a flat DB row into a Sales Order Event message.
 
     The returned dict contains:
-    • All fields required by simplified_order.json schema
+    • All fields required by simplified_order.json schema (including the
+      line-item Seller block introduced in the two-tier party model:
+      DeemedImporter = EU-based reseller, line-item Seller = non-EU producer)
     • Internal flat fields preserved at root level (for backward-compat workers)
     • _simulationMeta sub-object summarising the internal fields
 
@@ -108,6 +114,15 @@ def build_sales_order_event(row: dict) -> dict:
     correct_rate  = row.get("correct_vat_rate", 0.0)
     has_error     = row.get("has_error", 0)
     codes         = _CATEGORY_CODES.get(category, _DEFAULT_CODES)
+
+    # Producer (non-EU manufacturer) — populated by the seeder onto every
+    # transaction row in the two-tier party model. Older rows from a
+    # pre-migration DB may have NULL producer fields; render those as empty
+    # strings so the schema validation still passes.
+    producer_id      = row.get("producer_id")      or ""
+    producer_name    = row.get("producer_name")    or ""
+    producer_country = row.get("producer_country") or ""
+    producer_city    = row.get("producer_city")    or ""
 
     total_invoiced = round(net_value + vat_amount, 2)
 
@@ -145,6 +160,18 @@ def build_sales_order_event(row: dict) -> dict:
                         "TARICAdditionalCode":            [],
                     },
                 },
+                # ── Line-item Seller (non-EU producer) ─────────────────────
+                # Two-tier party model: the DeemedImporter above is the EU
+                # reseller; this Seller block describes the actual producer
+                # the goods originate from.
+                "Seller": {
+                    "identificationNumber": producer_id,
+                    "name":                 producer_name,
+                    "Address": {
+                        "cityName": producer_city,
+                        "country":  producer_country,
+                    },
+                },
             }
         ],
         # ── Simulation metadata (kept in file for transparency) ────────────
@@ -157,6 +184,11 @@ def build_sales_order_event(row: dict) -> dict:
             "vatRate":         vat_rate,
             "correctVatRate":  correct_rate,
             "hasError":        bool(has_error),
+            # Producer (non-EU manufacturer)
+            "producerId":      producer_id,
+            "producerName":    producer_name,
+            "producerCountry": producer_country,
+            "producerCity":    producer_city,
         },
         # ── Backward-compat flat fields (in-memory only, stripped in files) ─
         "transaction_id":   order_id,
@@ -176,6 +208,13 @@ def build_sales_order_event(row: dict) -> dict:
         # original DB row's xml_message + created_at so terminal storage works.
         "xml_message":      row.get("xml_message"),
         "created_at":       row.get("created_at", tx_date),
+        # Producer fields (two-tier party model). Propagated through the
+        # broker pipeline as flat compat fields so _db_store_worker can
+        # carry them into european_custom.db on terminal storage.
+        "producer_id":      producer_id or None,
+        "producer_name":    producer_name or None,
+        "producer_country": producer_country or None,
+        "producer_city":    producer_city or None,
     }
     return msg
 

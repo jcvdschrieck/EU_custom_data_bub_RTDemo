@@ -31,11 +31,19 @@ CREATE TABLE IF NOT EXISTS transactions (
     correct_vat_rate REAL    NOT NULL,
     has_error        INTEGER NOT NULL DEFAULT 0,
     xml_message      TEXT,
-    created_at       TEXT    NOT NULL
+    created_at       TEXT    NOT NULL,
+    -- Producer (non-EU manufacturer) sourced by the seller/reseller.
+    -- Populated by the seeder for new rows. May be NULL on rows from
+    -- older DBs created before the two-tier party model was introduced.
+    producer_id      TEXT,
+    producer_name    TEXT,
+    producer_country TEXT,
+    producer_city    TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_tx_date    ON transactions(transaction_date);
-CREATE INDEX IF NOT EXISTS idx_tx_seller  ON transactions(seller_name);
-CREATE INDEX IF NOT EXISTS idx_tx_buyer   ON transactions(buyer_country);
+CREATE INDEX IF NOT EXISTS idx_tx_date     ON transactions(transaction_date);
+CREATE INDEX IF NOT EXISTS idx_tx_seller   ON transactions(seller_name);
+CREATE INDEX IF NOT EXISTS idx_tx_buyer    ON transactions(buyer_country);
+CREATE INDEX IF NOT EXISTS idx_tx_producer ON transactions(producer_country);
 """
 
 _SIM_DDL = _TX_DDL + """
@@ -118,9 +126,14 @@ def _connect(path: Path) -> sqlite3.Connection:
 def _migrate_european_custom_db(conn: sqlite3.Connection) -> None:
     """Add columns / tables introduced after initial schema."""
     for col, definition in [
-        ("suspicious",     "INTEGER DEFAULT 0"),
-        ("alarm_id",       "INTEGER DEFAULT NULL"),
-        ("suspicion_level","TEXT    DEFAULT NULL"),
+        ("suspicious",       "INTEGER DEFAULT 0"),
+        ("alarm_id",         "INTEGER DEFAULT NULL"),
+        ("suspicion_level",  "TEXT    DEFAULT NULL"),
+        # Two-tier party model — non-EU producer (the line item Seller).
+        ("producer_id",      "TEXT    DEFAULT NULL"),
+        ("producer_name",    "TEXT    DEFAULT NULL"),
+        ("producer_country", "TEXT    DEFAULT NULL"),
+        ("producer_city",    "TEXT    DEFAULT NULL"),
     ]:
         try:
             conn.execute(f"ALTER TABLE transactions ADD COLUMN {col} {definition}")
@@ -131,6 +144,16 @@ def _migrate_european_custom_db(conn: sqlite3.Connection) -> None:
             s = stmt.strip()
             if s:
                 conn.execute(s)
+
+
+def _migrate_simulation_db(conn: sqlite3.Connection) -> None:
+    """Add producer columns to existing simulation.db files (the production
+    table column list lives in _TX_DDL but older DB files predate it)."""
+    for col in ("producer_id", "producer_name", "producer_country", "producer_city"):
+        try:
+            conn.execute(f"ALTER TABLE transactions ADD COLUMN {col} TEXT DEFAULT NULL")
+        except sqlite3.OperationalError:
+            pass   # already exists
 
 
 def init_european_custom_db() -> None:
@@ -159,6 +182,8 @@ def init_simulation_db() -> None:
             )
         except sqlite3.OperationalError:
             pass
+        # Producer columns may be missing on old simulation.db files.
+        _migrate_simulation_db(conn)
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_fired "
             "ON transactions(fired, transaction_date)"
@@ -169,6 +194,11 @@ def init_simulation_db() -> None:
 # ── European Custom DB write ───────────────────────────────────────────────────
 
 def insert_transaction(row: dict) -> None:
+    # Ensure the producer keys exist (older message paths may not set them).
+    row.setdefault("producer_id", None)
+    row.setdefault("producer_name", None)
+    row.setdefault("producer_country", None)
+    row.setdefault("producer_city", None)
     conn = _connect(EUROPEAN_CUSTOM_DB)
     with conn:
         conn.execute(
@@ -177,12 +207,14 @@ def insert_transaction(row: dict) -> None:
             (transaction_id, transaction_date, seller_id, seller_name,
              seller_country, item_description, item_category,
              value, vat_rate, vat_amount, buyer_country,
-             correct_vat_rate, has_error, xml_message, created_at)
+             correct_vat_rate, has_error, xml_message, created_at,
+             producer_id, producer_name, producer_country, producer_city)
             VALUES
             (:transaction_id, :transaction_date, :seller_id, :seller_name,
              :seller_country, :item_description, :item_category,
              :value, :vat_rate, :vat_amount, :buyer_country,
-             :correct_vat_rate, :has_error, :xml_message, :created_at)
+             :correct_vat_rate, :has_error, :xml_message, :created_at,
+             :producer_id, :producer_name, :producer_country, :producer_city)
             ON CONFLICT(transaction_id) DO UPDATE SET
               transaction_date  = excluded.transaction_date,
               seller_name       = excluded.seller_name,
@@ -191,7 +223,11 @@ def insert_transaction(row: dict) -> None:
               vat_rate          = excluded.vat_rate,
               vat_amount        = excluded.vat_amount,
               correct_vat_rate  = excluded.correct_vat_rate,
-              has_error         = excluded.has_error
+              has_error         = excluded.has_error,
+              producer_id       = excluded.producer_id,
+              producer_name     = excluded.producer_name,
+              producer_country  = excluded.producer_country,
+              producer_city     = excluded.producer_city
             """,
             row,
         )
@@ -207,12 +243,14 @@ def bulk_insert(rows: list[dict], path: Path = EUROPEAN_CUSTOM_DB) -> None:
             (transaction_id, transaction_date, seller_id, seller_name,
              seller_country, item_description, item_category,
              value, vat_rate, vat_amount, buyer_country,
-             correct_vat_rate, has_error, xml_message, created_at)
+             correct_vat_rate, has_error, xml_message, created_at,
+             producer_id, producer_name, producer_country, producer_city)
             VALUES
             (:transaction_id, :transaction_date, :seller_id, :seller_name,
              :seller_country, :item_description, :item_category,
              :value, :vat_rate, :vat_amount, :buyer_country,
-             :correct_vat_rate, :has_error, :xml_message, :created_at)
+             :correct_vat_rate, :has_error, :xml_message, :created_at,
+             :producer_id, :producer_name, :producer_country, :producer_city)
             """,
             rows,
         )

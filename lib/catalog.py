@@ -3,6 +3,20 @@ Suppliers, products, VAT rates.
 
 B2C OSS rule (EU, since Jul 2021): the VAT rate of the DESTINATION country applies.
 Suppliers must charge and remit the buyer's country VAT rate.
+
+Two-tier party model
+────────────────────
+The simulation models cross-border B2C as follows:
+  - SUPPLIERS         = EU-based **resellers** that import goods and sell
+                        them to EU consumers. They are the DeemedImporter
+                        on the customs message (and the seller_* columns
+                        in the DB).
+  - PRODUCERS         = non-EU **manufacturers** the supplier sources
+                        from. They appear as the Seller block on each
+                        SalesLineItem (the producer who actually made
+                        the goods).
+A given supplier may resell goods from multiple producers across the
+same product category. The seeder picks one producer per transaction.
 """
 
 COUNTRIES = ["FR", "DE", "ES", "IT", "NL", "PL", "IE"]
@@ -279,3 +293,107 @@ SUPPLIERS: list[dict] = [
         ],
     },
 ]
+
+
+# ── Producers (non-EU manufacturers) ─────────────────────────────────────────
+# Each producer is a real-world-plausible factory in a non-EU country. The
+# `categories` list controls which item categories the producer can supply;
+# the seeder uses pick_producer_for_category() to find a producer that
+# matches the category of each transaction.
+PRODUCERS: list[dict] = [
+    # ── Electronics / accessories (China, Korea, Japan, Taiwan, Vietnam) ──
+    {"id": "PROD-CN-001", "name": "ShenZhen TechFactory Co.",
+     "country": "CN", "city": "Shenzhen",
+     "categories": ["electronics", "auto_accessories"]},
+    {"id": "PROD-CN-002", "name": "Guangzhou Electronics Mfg.",
+     "country": "CN", "city": "Guangzhou",
+     "categories": ["electronics"]},
+    {"id": "PROD-KR-001", "name": "Seoul Display Industries",
+     "country": "KR", "city": "Seoul",
+     "categories": ["electronics", "cosmetics"]},
+    {"id": "PROD-JP-001", "name": "Osaka Precision Components",
+     "country": "JP", "city": "Osaka",
+     "categories": ["electronics", "auto_accessories"]},
+    {"id": "PROD-VN-001", "name": "Hanoi Electronics Assembly",
+     "country": "VN", "city": "Hanoi",
+     "categories": ["electronics"]},
+    # ── Clothing (Vietnam, Bangladesh, India, Turkey) ─────────────────────
+    {"id": "PROD-VN-002", "name": "Saigon Garment Co.",
+     "country": "VN", "city": "Ho Chi Minh City",
+     "categories": ["clothing"]},
+    {"id": "PROD-BD-001", "name": "Dhaka Apparel Manufacturers",
+     "country": "BD", "city": "Dhaka",
+     "categories": ["clothing"]},
+    {"id": "PROD-IN-001", "name": "Mumbai TextileWorks Pvt. Ltd.",
+     "country": "IN", "city": "Mumbai",
+     "categories": ["clothing", "home_goods"]},
+    {"id": "PROD-TR-001", "name": "Istanbul Fashion Production",
+     "country": "TR", "city": "Istanbul",
+     "categories": ["clothing"]},
+    # ── Food / health (Thailand, Brazil, Morocco) ──────────────────────────
+    {"id": "PROD-TH-001", "name": "Bangkok Foods International",
+     "country": "TH", "city": "Bangkok",
+     "categories": ["food", "health"]},
+    {"id": "PROD-BR-001", "name": "Sao Paulo Agricultural Co.",
+     "country": "BR", "city": "Sao Paulo",
+     "categories": ["food"]},
+    {"id": "PROD-MA-001", "name": "Casablanca Natural Products",
+     "country": "MA", "city": "Casablanca",
+     "categories": ["food", "cosmetics", "health"]},
+    # ── Cosmetics / beauty (Korea, China) ──────────────────────────────────
+    {"id": "PROD-KR-002", "name": "Seoul BeautyTech Manufacturing",
+     "country": "KR", "city": "Seoul",
+     "categories": ["cosmetics"]},
+    {"id": "PROD-CN-003", "name": "Shanghai Cosmetics Industries",
+     "country": "CN", "city": "Shanghai",
+     "categories": ["cosmetics"]},
+    # ── Books / publishing (China, India, US) ─────────────────────────────
+    {"id": "PROD-CN-004", "name": "Beijing Print House",
+     "country": "CN", "city": "Beijing",
+     "categories": ["books"]},
+    {"id": "PROD-IN-002", "name": "Delhi Publishing Co.",
+     "country": "IN", "city": "Delhi",
+     "categories": ["books"]},
+    {"id": "PROD-US-001", "name": "Chicago Print Group",
+     "country": "US", "city": "Chicago",
+     "categories": ["books"]},
+    # ── Sports (China, Vietnam, Pakistan) ──────────────────────────────────
+    {"id": "PROD-CN-005", "name": "Quanzhou Sports Equipment Co.",
+     "country": "CN", "city": "Quanzhou",
+     "categories": ["sports"]},
+    {"id": "PROD-VN-003", "name": "Da Nang Athletic Wear",
+     "country": "VN", "city": "Da Nang",
+     "categories": ["sports", "clothing"]},
+    {"id": "PROD-PK-001", "name": "Sialkot Sports Manufacturing",
+     "country": "PK", "city": "Sialkot",
+     "categories": ["sports"]},
+    # ── Home goods (China, India, Vietnam) ─────────────────────────────────
+    {"id": "PROD-CN-006", "name": "Foshan Home Furnishings",
+     "country": "CN", "city": "Foshan",
+     "categories": ["home_goods"]},
+    {"id": "PROD-CN-007", "name": "Yiwu Household Goods",
+     "country": "CN", "city": "Yiwu",
+     "categories": ["home_goods"]},
+    # ── Auto / accessories (China, Malaysia, Thailand) ─────────────────────
+    {"id": "PROD-CN-008", "name": "Wenzhou Auto Parts Mfg.",
+     "country": "CN", "city": "Wenzhou",
+     "categories": ["auto_accessories"]},
+    {"id": "PROD-MY-001", "name": "Penang Component Industries",
+     "country": "MY", "city": "Penang",
+     "categories": ["auto_accessories", "electronics"]},
+    # ── Hong Kong wildcard — covers anything via consolidated trading ─────
+    {"id": "PROD-HK-001", "name": "Hong Kong Trading & Mfg.",
+     "country": "HK", "city": "Hong Kong",
+     "categories": ["electronics", "clothing", "home_goods", "cosmetics", "auto_accessories", "sports"]},
+]
+
+
+def producers_for_category(category: str) -> list[dict]:
+    """Return every producer that lists *category* in its categories list."""
+    return [p for p in PRODUCERS if category in p["categories"]]
+
+
+def producer_countries() -> set[str]:
+    """ISO codes of every country where at least one producer is based.
+    Useful for sanity checks (none should be inside the EU)."""
+    return {p["country"] for p in PRODUCERS}

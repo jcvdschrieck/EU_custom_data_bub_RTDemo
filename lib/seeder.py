@@ -14,7 +14,10 @@ import random
 import uuid
 from datetime import date, datetime, timedelta, timezone
 
-from lib.catalog import COUNTRIES, SUPPLIERS, VAT_RATES
+from lib.catalog import (
+    COUNTRIES, SUPPLIERS, VAT_RATES,
+    PRODUCERS, producers_for_category,
+)
 from lib.config import (
     EUROPEAN_CUSTOM_DB, SIMULATION_DB,
     SIM_START_DT, SIM_END_DT,
@@ -25,6 +28,16 @@ from lib.database import (
     init_simulation_db,
 )
 from lib.xml_generator import transaction_to_xml
+
+
+def _pick_producer(category: str) -> dict:
+    """Choose a random producer that supplies *category*. Falls back to any
+    producer in the catalog if no category match exists (defensive — every
+    category in the codebase is currently covered)."""
+    pool = producers_for_category(category)
+    if not pool:
+        pool = PRODUCERS
+    return random.choice(pool)
 
 random.seed(42)
 
@@ -56,6 +69,7 @@ def _random_datetime(d: date) -> str:
 def _generate_transaction(d: date, error_rate: float = 0.10) -> dict:
     supplier     = random.choice(SUPPLIERS)
     description, category, base_price = random.choice(supplier["products"])
+    producer     = _pick_producer(category)
 
     # Slight price variation ±15%
     value = round(base_price * random.uniform(0.85, 1.15), 2)
@@ -96,6 +110,12 @@ def _generate_transaction(d: date, error_rate: float = 0.10) -> dict:
         "has_error":        has_error,
         "xml_message":      None,       # filled below
         "created_at":       tx_date,
+        # Two-tier party model: the supplier is an EU reseller; the producer
+        # is a non-EU manufacturer (the line-item Seller on the customs message).
+        "producer_id":      producer["id"],
+        "producer_name":    producer["name"],
+        "producer_country": producer["country"],
+        "producer_city":    producer["city"],
     }
     row["xml_message"] = transaction_to_xml(row)
     return row
@@ -141,6 +161,7 @@ def _scenario_transactions(d: date) -> list[dict]:
     electronics_products = [(d, c, p) for d, c, p in SCENARIO_SUPPLIER["products"] if c == "electronics"]
     for _ in range(8):
         description, category, base_price = random.choice(electronics_products)
+        producer   = _pick_producer(category)
         value      = round(base_price * random.uniform(0.85, 1.15), 2)
         vat_rate   = WRONG_VAT_RATE
         vat_amount = round(value * vat_rate, 2)
@@ -164,6 +185,10 @@ def _scenario_transactions(d: date) -> list[dict]:
             "xml_message":      None,
             "created_at":       tx_date,
             "fired":            0,
+            "producer_id":      producer["id"],
+            "producer_name":    producer["name"],
+            "producer_country": producer["country"],
+            "producer_city":    producer["city"],
         }
         from lib.xml_generator import transaction_to_xml
         row["xml_message"] = transaction_to_xml(row)
@@ -231,12 +256,14 @@ def seed_simulation_db() -> int:
             (transaction_id, transaction_date, seller_id, seller_name,
              seller_country, item_description, item_category,
              value, vat_rate, vat_amount, buyer_country,
-             correct_vat_rate, has_error, xml_message, created_at, fired)
+             correct_vat_rate, has_error, xml_message, created_at, fired,
+             producer_id, producer_name, producer_country, producer_city)
             VALUES
             (:transaction_id, :transaction_date, :seller_id, :seller_name,
              :seller_country, :item_description, :item_category,
              :value, :vat_rate, :vat_amount, :buyer_country,
-             :correct_vat_rate, :has_error, :xml_message, :created_at, :fired)
+             :correct_vat_rate, :has_error, :xml_message, :created_at, :fired,
+             :producer_id, :producer_name, :producer_country, :producer_city)
             """,
             rows,
         )
