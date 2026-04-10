@@ -1636,6 +1636,12 @@ def sim_reset():
         while not _investigation_queue.empty():
             try: _investigation_queue.get_nowait()
             except Exception: break
+    # Clear the manual-mode holding dict and push a fresh (empty) snapshot
+    # to every SSE subscriber so the Revenue Guardian Tax Authority page
+    # drops all the stale rows immediately instead of keeping them around
+    # until the next individual decide/run-agent event.
+    _pending_investigations.clear()
+    _broadcast_pending_update()
     for sse_q in list(_sse_queues):
         try:
             sse_q.put_nowait("__reset__")
