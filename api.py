@@ -88,7 +88,7 @@ import asyncio
 import json as _json
 from collections import deque
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, Query, Request
@@ -186,6 +186,27 @@ def _track_factory_task(coro) -> asyncio.Task:
     _inflight_factory_tasks.add(task)
     task.add_done_callback(_inflight_factory_tasks.discard)
     return task
+
+
+async def _sleep_until_sim_time(target_dt: datetime) -> None:
+    """
+    Wait until ``state.sim_time`` reaches ``target_dt``.
+
+    Polls ``state.sim_time`` every 50 ms instead of doing a single fixed
+    real-time ``asyncio.sleep`` so factory delays naturally:
+      - **pause** when the user pauses the simulation (sim_time freezes,
+        the loop just keeps spinning, no event fires until resume),
+      - **adapt to speed changes** (a ×100 boost makes sim_time advance
+        20× faster, the wait shortens automatically),
+      - **cancel cleanly** on simulation reset (CancelledError raised inside
+        the inner ``asyncio.sleep`` propagates out and the task dies).
+
+    Use this in any factory whose delay should be expressed in sim-time
+    rather than wall-clock time (Order Validation, Arrival Notification, …).
+    """
+    from lib.simulator import state as _state
+    while _state.sim_time < target_dt:
+        await asyncio.sleep(0.05)
 
 
 # ── Simulation: publish to Sales-order Event Broker ──────────────────────────
@@ -326,9 +347,10 @@ async def _order_validation_factory() -> None:
     """
     Subscriber of Sales-order Event Broker.
     Validates the incoming sales order (required fields, numeric sanity,
-    known country code) after a uniformly-distributed delay of 3–5 sim-seconds
-    (the wall-clock wait scales with state.speed so the offset stays constant
-    in sim-time across ×1 / ×10 / ×100 playback).
+    known country code) after a uniformly-distributed delay of 3–5 sim-seconds.
+    The wait is expressed in sim-time via _sleep_until_sim_time so it
+    naturally pauses with the simulation, adapts to speed changes, and
+    cancels cleanly on reset.
 
     Each order is handled by an independent asyncio task — unlimited concurrency,
     no order waits behind another in this factory.
@@ -340,7 +362,8 @@ async def _order_validation_factory() -> None:
 
     async def _validate(tx: dict) -> None:
         sim_delay = random.uniform(3.0, 5.0)
-        await asyncio.sleep(sim_delay / max(0.01, _state.speed))
+        target = _state.sim_time + timedelta(seconds=sim_delay)
+        await _sleep_until_sim_time(target)
         errors: list[str] = []
         for field in ("transaction_id", "seller_id", "seller_name",
                       "buyer_country", "value", "vat_rate", "vat_amount"):
@@ -370,11 +393,10 @@ async def _arrival_notification_factory() -> None:
     """
     Subscribes to Sales-order Event Broker.
     For each sales order, spawns an independent asyncio task that waits an
-    exponentially-distributed delay (mean 30 sim-seconds, converted to
-    wall-clock by dividing by state.speed) then publishes to
-    ARRIVAL_NOTIFICATION. Defining the delay in sim-seconds keeps arrivals
-    tightly coupled to their orders at all playback speeds — 30 sim-sec mean
-    offset whether running at ×1, ×10 or ×100.
+    exponentially-distributed delay (mean 30 sim-seconds) before publishing
+    to ARRIVAL_NOTIFICATION. The wait is expressed in sim-time via
+    _sleep_until_sim_time so arrivals stay tightly coupled to their orders
+    in sim-time and naturally pause/resume/reset alongside the simulation.
 
     Unlimited concurrency — each order is scheduled independently; no order
     ever blocks behind another in this factory.
@@ -386,9 +408,9 @@ async def _arrival_notification_factory() -> None:
     MEAN_SIM_SECONDS = 30.0
 
     async def _schedule(tx: dict) -> None:
-        sim_delay  = random.expovariate(1.0 / MEAN_SIM_SECONDS)
-        real_delay = sim_delay / max(0.01, _state.speed)
-        await asyncio.sleep(real_delay)
+        sim_delay = random.expovariate(1.0 / MEAN_SIM_SECONDS)
+        target    = _state.sim_time + timedelta(seconds=sim_delay)
+        await _sleep_until_sim_time(target)
         payload = build_arrival_notification(tx, _state.sim_time)
         await broker.publish(ARRIVAL_NOTIFICATION, payload)
 
@@ -1440,6 +1462,12 @@ async def api_investigations_run_agent(transaction_id: str):
     entry["updated_at"] = now_iso
     _broadcast_pending_update()
 
+    # NOTE: this background runner is intentionally exempt from sim-time
+    # pausing. The actual analysis is a synchronous LM Studio HTTP call
+    # executed inside a thread pool, and the asyncio task only awaits its
+    # completion — there is no factory delay to gate. If the user pauses or
+    # resets mid-analysis the asyncio task is cancelled (the future's result
+    # is then discarded) but the underlying LLM call finishes on its thread.
     async def _run() -> None:
         from lib.agent_bridge import analyse_transaction_sync
         tx = entry["tx"]
