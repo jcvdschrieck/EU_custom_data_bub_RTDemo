@@ -267,8 +267,8 @@ async def _RT_risk_monitoring_1_factory() -> None:
 async def _RT_risk_monitoring_2_factory() -> None:
     """
     Subscriber of Sales-order Event Broker.
-    Checks whether the (seller_id, buyer_country) pair appears in the
-    configured watchlist (lib/watchlist.py).
+    Checks whether the (seller_id, seller_country) pair — supplier × country
+    of origin — appears in the configured watchlist (lib/watchlist.py).
     Publishes outcome to RT_risk_monitoring_2_outcome_broker.
     """
     from lib.watchlist import is_watchlisted
@@ -277,7 +277,7 @@ async def _RT_risk_monitoring_2_factory() -> None:
     while True:
         tx = await q.get()
 
-        flagged = is_watchlisted(tx["seller_id"], tx["buyer_country"])
+        flagged = is_watchlisted(tx["seller_id"], tx["seller_country"])
 
         await broker.publish(RT_RISK_2_OUTCOME, {
             "tx":      tx,
