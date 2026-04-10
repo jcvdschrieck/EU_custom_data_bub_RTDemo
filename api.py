@@ -1,86 +1,108 @@
 """
-European Custom Data Hub — Real-Time Demo API  (v4.0)
-FastAPI backend on port 8505.
+European Custom Data Hub — Real-Time Demo API
+FastAPI backend on port 8000.
 
 Message flow (publish-subscribe)
 ─────────────────────────────────────────────────────────────────────────────
 
- Simulation loop
-     │  publishes each raw transaction (inter-event pacing per sim clock)
+ simulation_loop
+     │  publishes one raw transaction per sim-clock tick
      ▼
- ┌────────────────────────────────────────────────────────────────────────┐
- │  Sales-order Event Broker  (topic: sales_order_event)                 │
- └───────────┬──────────────────────┬──────────────────────┬─────────────┘
-             │                      │                      │
-             ▼                      ▼                      ▼
- ┌────────────────────┐  ┌────────────────────┐  ┌──────────────────────┐
- │ _RT_risk_          │  │ _RT_risk_          │  │ _order_validation_   │
- │ monitoring_1_      │  │ monitoring_2_      │  │ factory              │
- │ factory            │  │ factory            │  │                      │
- │ (VAT ratio check)  │  │ (watchlist check)  │  │ validates fields     │
- └────────┬───────────┘  └────────┬───────────┘  └──────────┬───────────┘
-          │                       │                          │
-          ▼                       ▼                          │
- RT_risk_1_outcome_broker  RT_risk_2_outcome_broker          │
-          │                       │                          │
-          └──────────┬────────────┘                          │
-                     ▼                                       │
-          ┌──────────────────────┐                           │
-          │ _RT_consolidation_   │                           │
-          │ factory              │                           │
-          │ green / amber / red  │                           │
-          └──────────┬───────────┘                           │
-                     │                                       │
-                     ▼                                       ▼
-                 RT_score_broker            Order_validation_broker
-                     │                                       │
-                     └──────────────┬────────────────────────┘
-                                    ▼
-                          ┌──────────────────────┐
-                          │  _release_factory    │
-                          │  combines score +    │
-                          │  validation          │
-                          └──────────┬───────────┘
-                                     │
-                                     ▼
-                          Release_Event_Broker  (topic: release_event)
-                                     │
-                                     ▼
-                          ┌──────────────────────┐
-                          │  _db_store_worker    │
-                          │  INSERT + flag       │
-                          │  live queue + SSE    │
-                          └──────────────────────┘
+ Sales-order Event Broker  (topic: sales_order_event)
+     │
+     ├──────────────────────┬─────────────────────────┬─────────────────────┐
+     ▼                      ▼                         ▼                     ▼
+ _RT_risk_              _RT_risk_                 _order_              _arrival_
+ monitoring_1_          monitoring_2_             validation_          notification_
+ factory                factory                   factory              factory
+ (VAT-ratio rule)       (watchlist rule)          (field check)        (~60 s delay)
+     │                      │                         │                     │
+     ▼                      ▼                         │                     │
+ rt_risk_1_outcome     rt_risk_2_outcome              │                     │
+     │                      │                         │                     │
+     └──────────┬───────────┘                         │                     │
+                ▼                                     │                     │
+        _RT_consolidation_factory                     │                     │
+        (green / amber / red)                         │                     │
+                │                                     │                     │
+                ▼                                     ▼                     ▼
+            rt_score                          order_validation       arrival_notification
+                │                                     │                     │
+                └─────────────────┬───────────────────┴─────────────────────┘
+                                  ▼
+                         _release_factory
+                         (joins all signals, routes by colour)
+                                  │
+                ┌─────────────────┼─────────────────┐
+                ▼                 ▼                 ▼
+         release_event       retain_event     investigate_event
+            (GREEN)             (RED)             (AMBER)
+                │                 │                 │
+                │                 ▼                 ▼
+                │         _customs_listener    _tax_listener
+                │         _factory             _factory
+                │                 │                 │
+                │                 ▼                 ▼
+                │           _customs_queue     _tax_queue
+                │                 │                 │
+                │                 │                 │  Tax officer triggers
+                │                 │                 │  the VAT Fraud Detection
+                │                 │                 │  Agent → ai_analysis_event
+                │                 │                 │
+                │                 │  ◄── recommend ─┤  (back to Customs)
+                │                 │                 │
+                │                 │  ── escalate ─► │
+                │                 │                 │
+                │                 ▼                 │
+                │         Customs Officer terminal decision
+                │                 │
+                │     ┌───────────┴───────────┐
+                │     ▼                       ▼
+                │  release_after_      agent_retain_event
+                │  investigation_event  (officer retained)
+                │                       │
+                ▼                       ▼
+              _db_store_worker  →  european_custom.db (legacy flat table)
+                                      + live queue + /api/queue SSE
+              _data_hub_writer  →  sales_order_line_item +
+              (30-s polling tick)    line_item_risk +
+                                      line_item_ai_analysis
 
- AI Agent — triggered manually from the dashboard
- ─────────────────────────────────────────────────
- POST /api/agent/analyse/{transaction_id}  →  _agent_worker  →  verdict
-   • incorrect → suspicion_level='high', insert ireland_queue
-   • correct/uncertain → clear suspicious flag
+The Customs Officer console (Revenue Guardian /customs page) is master:
+its release/retain decision is the terminal event. The Tax Officer console
+(Revenue Guardian /tax page) only issues a recommendation that the Customs
+Officer can accept or override (audited via the custom_override flag).
 
-Endpoints
-─────────
+Key endpoints
+─────────────
 GET  /health
-GET  /api/queue                     latest 30 live transactions (REST snapshot)
-GET  /api/queue/stream              SSE stream — one transaction per event
-GET  /api/transactions              paginated historical query
-GET  /api/metrics                   VAT aggregates with filters
-GET  /api/alarms                    alarm list (active_only optional)
-GET  /api/suspicious                last 50 suspicious transactions
-GET  /api/agent-log                 agent analysis history (with legislation_refs)
-GET  /api/agent-processing          transactions currently being analysed
-POST /api/agent/analyse/{tx_id}     trigger AI agent from dashboard
-GET  /api/ireland-queue             cases forwarded to Ireland investigation
-GET  /api/ireland-case/{tx_id}      full case detail
+GET  /api/queue                          live tail (REST snapshot)
+GET  /api/queue/stream                   SSE — one transaction per event
+GET  /api/transactions                   paginated historical query
+GET  /api/metrics                        VAT aggregates with filters
+GET  /api/suspicious                     historical suspicious transactions
+GET  /api/alarms                         VAT-ratio alarm list
+
+GET  /api/customs/queue                  live Customs queue (REST snapshot)
+GET  /api/customs/queue/stream           SSE — Customs queue updates
+POST /api/customs/{id}/escalate-to-tax   move item from Customs to Tax queue
+POST /api/customs/{id}/decide            terminal release / retain decision
+
+GET  /api/tax/queue                      live Tax queue (REST snapshot)
+GET  /api/tax/queue/stream               SSE — Tax queue updates
+POST /api/tax/{id}/run-agent             trigger VAT Fraud Detection Agent
+POST /api/tax/{id}/recommend             release / retain recommendation back to Customs
+
+GET  /api/transactions/{id}/timeline     full event history for a transaction
 GET  /api/simulation/status
+GET  /api/simulation/pipeline            event counters + queue depths + risk flags
 POST /api/simulation/start
 POST /api/simulation/pause
 POST /api/simulation/resume
-POST /api/simulation/speed          body: {"speed": <float>}
+POST /api/simulation/speed               body: {"speed": <float>}
 POST /api/simulation/reset
 GET  /api/catalog/suppliers
 GET  /api/catalog/countries
-Static: /ireland-app/               standalone Irish Revenue investigation app
 """
 from __future__ import annotations
 

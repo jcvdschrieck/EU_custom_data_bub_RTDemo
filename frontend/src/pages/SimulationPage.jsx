@@ -382,8 +382,8 @@ function ScoreBadges({ green, amber, red }) {
   return (
     <div style={{ marginTop: 5, display: 'flex', justifyContent: 'center', gap: 3, flexWrap: 'wrap' }}>
       <span style={{ background: '#d4edda', color: '#155724', border: '1px solid #c3e6cb', padding: '1px 5px', borderRadius: 8, fontSize: 9, fontWeight: 700 }}>● {fmt(green)}</span>
-      <span style={{ background: '#fff3cd', color: '#856404', border: '1px solid #ffc107', padding: '1px 5px', borderRadius: 8, fontSize: 9, fontWeight: 700 }}>● {fmt(amber)}</span>
       <span style={{ background: '#fde8e8', color: '#c0392b', border: '1px solid #f5c6cb', padding: '1px 5px', borderRadius: 8, fontSize: 9, fontWeight: 700 }}>● {fmt(red)}</span>
+      <span style={{ background: '#fff3cd', color: '#856404', border: '1px solid #ffc107', padding: '1px 5px', borderRadius: 8, fontSize: 9, fontWeight: 700 }}>● {fmt(amber)}</span>
     </div>
   )
 }
@@ -412,8 +412,8 @@ function FanOutSVG({ height, targetYs, color = '#adb5bd', width = 48, dashed = f
 // Fan-out with per-target dashed style (all arrows now share the neutral grey
 // stroke). The vertical spine is split into per-pair segments so the carrier
 // of any dashed branch is itself dashed — this means the vertical leg from
-// the Sales-order Event broker down to Transport (dashed branch) appears
-// dashed end-to-end, matching the horizontal Transport extension.
+// the Sales-order Event broker down to Goods Transport (dashed branch) appears
+// dashed end-to-end, matching the horizontal Goods Transport extension.
 function FanOutMixedSVG({ height, targets, width = 56 }) {
   if (!targets?.length) return null
   const spineX = 8
@@ -491,8 +491,8 @@ function FanInSVG({ height, inputYs, outputY, color = '#adb5bd', width = 48 }) {
 //
 // DB Store Factory and the Custom Data Hub cylinder are wrapped in a single
 // dashed zone — incoming arrows terminate at the zone's outer border rather
-// than the individual elements, like Order Validation / RT Risk / Transport
-// zones on the left.
+// than the individual elements, like Sales Order Validation / Real-Time Risk
+// Assessment / Goods Transport zones on the left.
 //
 // Loop-back arrows:
 //   Post-Inv Release → Release-after-Inv  (green, bottom → top)
@@ -690,8 +690,8 @@ function MiddleSection({ ev, rf, customs, tax, taxRunning, stored, newStored, H,
         <text x={LSTN_LEFT - 26} y={Y_RET - 6}
               fontSize={9} fill={red} textAnchor="start" fontWeight={700}>retain → customs</text>
 
-        {/* Investigation Notification → Tax Listener (corner: right then down
-            then right). AMBER routed transactions enter the Tax queue. */}
+        {/* Sales Order for Investigation → Tax Listener (corner: right then
+            down then right). AMBER routed transactions enter the Tax queue. */}
         <polyline
           points={`0,${Y_INV} ${LSTN_LEFT - 30},${Y_INV} ${LSTN_LEFT - 30},${Y_TAX} ${LSTN_LEFT},${Y_TAX}`}
           stroke={grey} strokeWidth={stroke} fill="none" />
@@ -817,21 +817,21 @@ function MiddleSection({ ev, rf, customs, tax, taxRunning, stored, newStored, H,
           gap: 6, height: 'calc(100% - 32px)', justifyContent: 'center',
         }}>
           <FactoryNode icon="💾" label="DB Store Factory" description="Insert + flag suspicious" sm
-            tooltip="DB Store Factory — subscribes to Automated Release, Release Post Inv. and Retain Post Inv. Inserts into european_custom.db and pushes to the live queue / SSE stream." />
+            tooltip="DB Store Factory — subscribes to Sales Order Release, Release Post Inv. and Retain Post Inv. Inserts into european_custom.db and pushes to the live queue / SSE stream." />
           <Arrow down />
           <DBSinkNode count={stored} newCount={newStored}
             tooltip={`Custom Data Hub — ${fmt(stored)} total records (includes historical seed). ${fmt(newStored)} new records stored since the last simulation reset.`} />
         </div>
       </div>
 
-      {/* Release Post Investigation broker — mirrors Automated Release */}
+      {/* Release Post Investigation broker — mirrors Sales Order Release */}
       <div style={{ position: 'absolute', top: RAFT_TOP, left: AFT_LEFT, width: AFT_W }}>
         <BrokerNode label="Release Post Inv." topicKey="RELEASE_POST_INV"
           count={ev.release_after_investigation_event} accent={green} sm width={AFT_W}
           tooltip="Release Post Inv. — terminal event for officer-cleared transactions. Stored to the DB without the suspicious flag." />
       </div>
 
-      {/* Retain Post Investigation broker — mirrors Automated Retain */}
+      {/* Retain Post Investigation broker — mirrors Sales Order Retained */}
       <div style={{ position: 'absolute', top: RETAFT_TOP, left: AFT_LEFT, width: AFT_W }}>
         <BrokerNode label="Retain Post Inv." topicKey="RETAIN_POST_INV"
           count={ev.agent_retain_event} accent={red} sm width={AFT_W}
@@ -966,11 +966,11 @@ function KpiStrip({ pipeline }) {
   // Ingested: entry to the pipeline
   const ingested = ev.sales_order_event || 0
 
-  // Released: Automated Release + Release Post Inv. (both release paths)
+  // Released: Sales Order Release + Release Post Inv. (both release paths)
   const released = (ev.release_event                     || 0)
                  + (ev.release_after_investigation_event || 0)
 
-  // Retained: Automated Retain + Retain Post Inv. (both retain paths)
+  // Retained: Sales Order Retained + Retain Post Inv. (both retain paths)
   const retained = (ev.retain_event      || 0)
                  + (ev.agent_retain_event || 0)
 
@@ -979,7 +979,7 @@ function KpiStrip({ pipeline }) {
                      + (ev.agent_release_event || 0)
 
   // Under investigation: cumulative amber-routed minus completed = currently in-flight
-  // (in the FIFO queue or being processed by the VAT Agent Worker)
+  // (in the Tax queue or being processed by the VAT Fraud Detection Agent)
   const underInvestigation = Math.max(
     0,
     (ev.investigate_event || 0) - investigated
@@ -989,13 +989,13 @@ function KpiStrip({ pipeline }) {
     { key: 'ingested',     label: 'Ingested',           value: ingested,          color: 'var(--eu-blue)',
       tooltip: 'Sales-order events fired by the simulation engine (entry to the pipeline).' },
     { key: 'released',     label: 'Released',           value: released,          color: '#1f7a3c',
-      tooltip: 'Automated Release + Release Post Inv. — total transactions cleared for release (both automated and post-investigation).' },
+      tooltip: 'Sales Order Release + Release Post Inv. — total transactions cleared for release (both automated and post-investigation).' },
     { key: 'retained',     label: 'Retained',           value: retained,          color: '#c0392b',
-      tooltip: 'Automated Retain + Retain Post Inv. — total transactions flagged as suspicious and retained (both automated and post-investigation).' },
+      tooltip: 'Sales Order Retained + Retain Post Inv. — total transactions flagged as suspicious and retained (both automated and post-investigation).' },
     { key: 'investigated', label: 'Investigated',       value: investigated,      color: '#e6820a',
-      tooltip: 'Investigations the VAT Agent has completed (produced a verdict: correct, uncertain, or incorrect).' },
+      tooltip: 'Investigations the VAT Fraud Detection Agent has completed (produced a verdict: correct, uncertain, or incorrect).' },
     { key: 'underInv',     label: 'Under Investigation', value: underInvestigation, color: '#9c27b0',
-      tooltip: 'Transactions currently in the investigation pipeline — waiting in the FIFO queue or being analysed by the VAT Agent Worker.' },
+      tooltip: 'Transactions currently in the Tax queue — waiting for the Tax officer to act or being analysed by the VAT Fraud Detection Agent.' },
   ]
 
   return (
@@ -1044,16 +1044,18 @@ function PipelineDiagram({ pipeline }) {
   const yRT = OV_H + LGAP + RT_H / 2
   const yAN = OV_H + LGAP + RT_H + LGAP + AN_H / 2
 
-  // Shared width for the three top zones so OV and Transport match the RT zone
+  // Shared width for the three top zones so Sales Order Validation and
+  // Goods Transport match the Real-Time Risk Assessment zone
   const ZONE_W = 440
-  // Shared width for OV and Transport factories (so they match each other)
-  // OV / Transport factories fill their parent zone's content area
+  // Shared width for the Sales Order Validation and Goods Transport factories
+  // so they match each other. Each fills its parent zone's content area
   // (ZONE_W − 2× zone padding 10 = 420). With justifyContent: center the
   // factory is visually centered AND its right edge lines up with the
-  // RT Consolidation factory on the right side of the RT zone (also
-  // bounded by the same zone padding).
+  // Risk Score Consolidation factory on the right side of the Real-Time
+  // Risk Assessment zone (also bounded by the same zone padding).
   const SIDE_FACTORY_W = 420
-  // Shared width for the three row-1 output brokers (OV / RT Score / Arrival Notification)
+  // Shared width for the three row-1 output brokers
+  // (Sales Order Validation / RT Score / Goods Arrival Notification)
   const OUT_BROKER_W = 170
 
   // RT zone internal row geometry (two stacked broker rows + fan-in to consolidation)
@@ -1095,9 +1097,10 @@ function PipelineDiagram({ pipeline }) {
           {/* ══ MAIN FLOW — single horizontal row: Entry → zones → brokers → Release Factory → event brokers → DB Store ══
               alignItems is "flex-start" so the LEFT columns (all natural height = ROW1_H)
               stay at the top of the row even when the MiddleSection grows taller to
-              accommodate the VAT Agent stacked under the Operator Console. With center
-              alignment the LEFT side would shift downward by (Heff - ROW1_H) / 2 and
-              break alignment with MiddleSection's absolute children. */}
+              accommodate the VAT Fraud Detection Agent stacked under the Tax Officer.
+              With center alignment the LEFT side would shift downward by
+              (Heff - ROW1_H) / 2 and break alignment with MiddleSection's absolute
+              children. */}
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: 0 }}>
 
             {/* Entry Broker — vertically centered on yRT (= ROW1_H/2) so it
@@ -1109,8 +1112,10 @@ function PipelineDiagram({ pipeline }) {
               </Zone>
             </div>
 
-            {/* FanOut: solid grey → OV + RT  |  dashed grey → Transport
-                (the spine segment between RT and Transport is dashed too) */}
+            {/* FanOut: solid grey → Sales Order Validation + Real-Time Risk
+                Assessment | dashed grey → Goods Transport (the spine segment
+                between Real-Time Risk Assessment and Goods Transport is
+                dashed too) */}
             <FanOutMixedSVG height={ROW1_H} width={48} targets={[
               { y: yOV, dashed: false },
               { y: yRT, dashed: false },
@@ -1121,17 +1126,17 @@ function PipelineDiagram({ pipeline }) {
             <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
 
               <div style={{ height: OV_H, display: 'flex', alignItems: 'center' }}>
-                <Zone label="Order Validation" style={{ width: ZONE_W, boxSizing: 'border-box' }}>
+                <Zone label="Sales Order Validation" style={{ width: ZONE_W, boxSizing: 'border-box' }}>
                   <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
-                    <FactoryNode icon="✅" label="Order Validation"
+                    <FactoryNode icon="✅" label="Sales Order Validation"
                       description="3–5 s · unlimited concurrency" sm width={SIDE_FACTORY_W}
-                      tooltip="Order Validation Factory — async per-order task with uniform 3–5 s delay. Emits ORDER_VALIDATION events." />
+                      tooltip="Sales Order Validation Factory — async per-order task with uniform 3–5 s delay. Emits ORDER_VALIDATION events." />
                   </div>
                 </Zone>
               </div>
 
               <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
-                <Zone label="RT Risk Monitoring" style={{ width: ZONE_W, height: '100%', boxSizing: 'border-box' }}>
+                <Zone label="Real-Time Risk Assessment" style={{ width: ZONE_W, height: '100%', boxSizing: 'border-box' }}>
                   {/* The inner content was visually biased toward the bottom of
                       the zone (large gap above the boxes, small gap below). A
                       small upward translate balances the gap on either side
@@ -1143,8 +1148,8 @@ function PipelineDiagram({ pipeline }) {
                     {/* Stacked RT1 + RT2 rows */}
                     <div style={{ display: 'flex', flexDirection: 'column', gap: RT_ROW_GAP }}>
                       <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <FactoryNode icon="⚖️" label="RT Risk Mon. 1" description="VAT ratio deviation" sm
-                          tooltip="RT Risk Monitor 1 — flags transactions whose VAT-to-value ratio deviates from the supplier's historical baseline." />
+                        <FactoryNode icon="⚖️" label="RT Risk As. 1" description="VAT ratio deviation" sm
+                          tooltip="RT Risk Assessment 1 — flags transactions whose VAT-to-value ratio deviates from the supplier's historical baseline." />
                         <Arrow />
                         <BrokerNode label="RT Risk 1 Outcome" topicKey="RT_RISK_1_OUTCOME"
                           count={ev.rt_risk_1_outcome} sm
@@ -1153,8 +1158,8 @@ function PipelineDiagram({ pipeline }) {
                         </BrokerNode>
                       </div>
                       <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <FactoryNode icon="🔍" label="RT Risk Mon. 2" description="Watchlist lookup" sm
-                          tooltip="RT Risk Monitor 2 — flags transactions whose seller or route appears on the active watchlist." />
+                        <FactoryNode icon="🔍" label="RT Risk As. 2" description="Watchlist lookup" sm
+                          tooltip="RT Risk Assessment 2 — flags transactions whose seller or route appears on the active watchlist." />
                         <Arrow />
                         <BrokerNode label="RT Risk 2 Outcome" topicKey="RT_RISK_2_OUTCOME"
                           count={ev.rt_risk_2_outcome} sm
@@ -1163,21 +1168,21 @@ function PipelineDiagram({ pipeline }) {
                         </BrokerNode>
                       </div>
                     </div>
-                    {/* FanIn: 2 rows → RT Consolidation */}
+                    {/* FanIn: 2 rows → Risk Score Consolidation */}
                     <FanInSVG height={RT_STACK_H} inputYs={[rtTopY, rtBotY]} outputY={rtOutY} width={36} />
-                    {/* RT Consolidation — horizontally to the right of the two monitoring rows */}
-                    <FactoryNode icon="🔄" label="RT Consolidation" description="GREEN / AMBER / RED" sm
-                      tooltip="RT Consolidation — combines RT1 + RT2 into a single risk score: GREEN (none flagged), AMBER (one), RED (both)." />
+                    {/* Risk Score Consolidation — horizontally to the right of the two assessment rows */}
+                    <FactoryNode icon="🔄" label="Risk Score Consolidation" description="GREEN / AMBER / RED" sm
+                      tooltip="Risk Score Consolidation — combines RT1 + RT2 into a single risk score: GREEN (none flagged), AMBER (one), RED (both)." />
                   </div>
                 </Zone>
               </div>
 
               <div style={{ height: AN_H, display: 'flex', alignItems: 'center' }}>
-                <Zone label="Transport" style={{ width: ZONE_W, boxSizing: 'border-box' }}>
+                <Zone label="Goods Transport" style={{ width: ZONE_W, boxSizing: 'border-box' }}>
                   <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
-                    <FactoryNode icon="🚢" label="Transport"
+                    <FactoryNode icon="🚢" label="Goods Transport"
                       description="exp. delay ~60 s · unlimited concurrency" sm width={SIDE_FACTORY_W}
-                      tooltip="Transport / Arrival Notification — async per-order task with exponential-delay arrival (~60 s mean). Emits ARRIVAL_NOTIFICATION events." />
+                      tooltip="Goods Transport / Arrival Notification — async per-order task with exponential-delay arrival (~60 s mean). Emits ARRIVAL_NOTIFICATION events." />
                   </div>
                 </Zone>
               </div>
@@ -1194,7 +1199,7 @@ function PipelineDiagram({ pipeline }) {
             {/* Three output brokers — same width, same default blue */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
               <div style={{ height: OV_H, display: 'flex', alignItems: 'center' }}>
-                <BrokerNode label="Order Validation" topicKey="ORDER_VALIDATION"
+                <BrokerNode label="Sales Order Validation" topicKey="ORDER_VALIDATION"
                   count={ev.order_validation} sm width={OUT_BROKER_W}
                   tooltip="ORDER_VALIDATION — field-completeness outcome per order. Consumed by the Release Factory." />
               </div>
@@ -1206,7 +1211,7 @@ function PipelineDiagram({ pipeline }) {
                 </BrokerNode>
               </div>
               <div style={{ height: AN_H, display: 'flex', alignItems: 'center' }}>
-                <BrokerNode label="Arrival Notification" topicKey="ARRIVAL_NOTIFICATION"
+                <BrokerNode label="Goods Arrival Notification" topicKey="ARRIVAL_NOTIFICATION"
                   count={ev.arrival_notification} sm width={OUT_BROKER_W}
                   tooltip="ARRIVAL_NOTIFICATION — emitted once goods arrive at destination. Required by the Release Factory." />
               </div>
@@ -1218,7 +1223,7 @@ function PipelineDiagram({ pipeline }) {
             {/* Release Factory — vertically centered at ROW1_H/2 to line up with the fan-in output */}
             <div style={{ height: ROW1_H, display: 'flex', alignItems: 'center' }}>
               <FactoryNode icon="🎯" label="Release Factory" description="routes by score + validation" sm
-                tooltip="Release Factory — waits for RT Score + Order Validation + Arrival Notification on each transaction, then routes: GREEN→Release, RED→Retain, AMBER→Investigate." />
+                tooltip="Release Factory — waits for RT Score + Sales Order Validation + Goods Arrival Notification on each transaction, then routes: GREEN→Release, RED→Retain, AMBER→Investigate." />
             </div>
 
             {/* Fan-out: Release Factory → 3 event brokers.
@@ -1228,19 +1233,19 @@ function PipelineDiagram({ pipeline }) {
             {/* Three event brokers — heights match row-1 zones so centers land at yOV / yRT / yAN */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
               <div style={{ height: OV_H, display: 'flex', alignItems: 'center' }}>
-                <BrokerNode label="Automated Release" topicKey="AUTOMATED_RELEASE"
+                <BrokerNode label="Sales Order Release" topicKey="AUTOMATED_RELEASE"
                   count={ev.release_event} accent="#1f7a3c" sm width={OUT_BROKER_W}
-                  tooltip="Automated Release — GREEN-path transactions cleared for storage without further investigation." />
+                  tooltip="Sales Order Release — GREEN-path transactions cleared for storage without further investigation." />
               </div>
               <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
-                <BrokerNode label="Automated Retain" topicKey="AUTOMATED_RETAIN"
+                <BrokerNode label="Sales Order Retained" topicKey="AUTOMATED_RETAIN"
                   count={ev.retain_event} accent="#c0392b" sm width={OUT_BROKER_W}
-                  tooltip="Automated Retain — RED-path transactions stored with the suspicious flag set." />
+                  tooltip="Sales Order Retained — RED-path transactions stored with the suspicious flag set." />
               </div>
               <div style={{ height: AN_H, display: 'flex', alignItems: 'center' }}>
-                <BrokerNode label="Investigation Notification" topicKey="INVESTIGATION_NOTIFICATION"
+                <BrokerNode label="Sales Order for Investigation" topicKey="INVESTIGATION_NOTIFICATION"
                   count={ev.investigate_event} accent="#e6820a" sm width={OUT_BROKER_W}
-                  tooltip="Investigation Notification — AMBER-path transactions handed off to the investigation sub-pipeline." />
+                  tooltip="Sales Order for Investigation — AMBER-path transactions handed off to the investigation sub-pipeline." />
               </div>
             </div>
 
@@ -1275,7 +1280,7 @@ function PipelineDiagram({ pipeline }) {
         <LegendItem color="#6366f1" bg="#eef2ff" label="Revenue Guardian UI (operator)" />
         {/* Connector / arrow coding — all line strokes are neutral grey;
             only the dashed style remains as a semantic differentiator. */}
-        <LegendItem color="#adb5bd" bg="#f8f9fa" label="Transport / Arrival (dashed)" dashed />
+        <LegendItem color="#adb5bd" bg="#f8f9fa" label="Goods Transport / Arrival (dashed)" dashed />
 
         <div style={{ marginLeft: 8, fontSize: 11, color: 'var(--text-muted)' }}>
           Brokers all share the blue outer border — the inner sub-box carries the differentiating color.
@@ -1302,14 +1307,14 @@ function LegendItem({ color, bg, label, dashed }) {
 
 const TOPIC_META = [
   { key: 'sales_order_event',                   label: 'Sales-order Event Broker',        factory: 'Simulation loop',                    color: '#0050a0' },
-  { key: 'order_validation',                    label: 'Order Validation',                 factory: 'Order Validation Factory',           color: '#1f7a3c' },
-  { key: 'rt_risk_1_outcome',                   label: 'RT Risk 1 Outcome',                factory: 'RT Risk Monitoring 1',               color: '#6f42c1' },
-  { key: 'rt_risk_2_outcome',                   label: 'RT Risk 2 Outcome',                factory: 'RT Risk Monitoring 2',               color: '#6f42c1' },
-  { key: 'rt_score',                            label: 'RT Score',                         factory: 'RT Consolidation Factory',            color: '#e6820a' },
-  { key: 'arrival_notification',                label: 'Arrival Notification',             factory: 'Arrival Notification Factory',        color: '#e67e22' },
-  { key: 'release_event',                       label: 'Automated Release',                factory: 'Release Factory (GREEN)',             color: '#1f7a3c' },
-  { key: 'retain_event',                        label: 'Automated Retain',                 factory: 'Retain Factory (RED)',                color: '#c0392b' },
-  { key: 'investigate_event',                   label: 'Investigation Notification',       factory: 'Investigate Dispatch Factory (AMBER)', color: '#e6820a' },
+  { key: 'order_validation',                    label: 'Sales Order Validation',           factory: 'Sales Order Validation Factory',     color: '#1f7a3c' },
+  { key: 'rt_risk_1_outcome',                   label: 'RT Risk 1 Outcome',                factory: 'Real-Time Risk Assessment 1',        color: '#6f42c1' },
+  { key: 'rt_risk_2_outcome',                   label: 'RT Risk 2 Outcome',                factory: 'Real-Time Risk Assessment 2',        color: '#6f42c1' },
+  { key: 'rt_score',                            label: 'RT Score',                         factory: 'Risk Score Consolidation Factory',    color: '#e6820a' },
+  { key: 'arrival_notification',                label: 'Goods Arrival Notification',       factory: 'Goods Transport Factory',             color: '#e67e22' },
+  { key: 'release_event',                       label: 'Sales Order Release',              factory: 'Release Factory (GREEN)',             color: '#1f7a3c' },
+  { key: 'retain_event',                        label: 'Sales Order Retained',             factory: 'Retain Factory (RED)',                color: '#c0392b' },
+  { key: 'investigate_event',                   label: 'Sales Order for Investigation',    factory: 'Investigate Dispatch Factory (AMBER)', color: '#e6820a' },
   { key: 'agent_retain_event',                  label: 'Retain Post Inv.',                 factory: 'Investigation Agent Worker',          color: '#c0392b' },
   { key: 'agent_release_event',                 label: 'Investigation Clearance',          factory: 'Investigation Agent Worker',          color: '#1f7a3c' },
   { key: 'release_after_investigation_event',   label: 'Release Post Inv.',                factory: 'Release After Investigation Factory', color: '#2e7d32' },
