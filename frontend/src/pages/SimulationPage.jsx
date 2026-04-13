@@ -1400,6 +1400,11 @@ function EventCountsTable({ pipeline }) {
 export default function SimulationPage() {
   const [status,   setStatus]   = useState(null)
   const [pipeline, setPipeline] = useState(null)
+  const [presentationMode, setPresentationMode] = useState(false)
+  // Ref so the SSE callback always sees the latest value without re-subscribing.
+  const presentationRef = useRef(false)
+  useEffect(() => { presentationRef.current = presentationMode }, [presentationMode])
+  const lastFrameRef = useRef(0)
 
   // One-shot REST refreshes — used as a fallback when the stream is unavailable,
   // and wired into the SimControls onRefresh so control actions feel instant.
@@ -1418,6 +1423,13 @@ export default function SimulationPage() {
 
     const es = openSimStateStream(
       (snap) => {
+        // Presentation mode: skip frames that arrive within 500 ms of the
+        // last accepted frame. Reduces rendering load during screen-sharing.
+        if (presentationRef.current) {
+          const now = Date.now()
+          if (now - lastFrameRef.current < 500) return
+          lastFrameRef.current = now
+        }
         if (snap?.status)   setStatus(snap.status)
         if (snap?.pipeline) setPipeline(snap.pipeline)
       },
@@ -1468,6 +1480,21 @@ export default function SimulationPage() {
           🧑‍💼 Open Revenue Guardian
           <span style={{ fontSize: 11, opacity: 0.85 }}>↗</span>
         </a>
+        <button
+          onClick={() => setPresentationMode(p => !p)}
+          title="Reduce UI refresh rate to 2 fps for smooth screen-sharing"
+          style={{
+            display: 'inline-flex', alignItems: 'center', gap: 6,
+            background: presentationMode ? '#059669' : '#64748b',
+            color: '#fff',
+            border: 'none', borderRadius: 'var(--radius)',
+            padding: '8px 14px', fontSize: 12, fontWeight: 700,
+            cursor: 'pointer', flex: '0 0 auto',
+            whiteSpace: 'nowrap',
+            boxShadow: presentationMode ? '0 1px 4px rgba(5,150,105,0.3)' : 'none',
+          }}>
+          🖥 Presentation {presentationMode ? 'ON' : 'OFF'}
+        </button>
       </div>
 
       <SimControls status={status} onRefresh={() => { refreshStatus(); refreshPipeline() }} />
