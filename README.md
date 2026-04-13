@@ -234,9 +234,19 @@ Revenue Guardian frontend (sibling repo, served at `:8080`):
 
 | Page | URL | Description |
 |---|---|---|
-| Customs Authority | `/customs-authority` | Live Customs queue overlay on top of historical suspicious transactions; release / retain / escalate-to-Tax actions |
-| Tax Authority | `/tax-authority` | Live Tax queue; Run Agent + Recommend (release / retain) actions |
+| Customs Authority | `/customs-authority` | Live Customs queue (RED-routed items only — decided transactions are removed immediately). Actions: release / retain / escalate-to-Tax |
+| Tax Authority | `/tax-authority` | Live Tax queue (AMBER-routed + escalated from Customs). Actions: Run Agent + Recommend (release / retain) |
 | Investigation | `/investigation/:id` | Case detail with full timeline, agent verdict, recommendation history |
+
+### Risk levels
+
+A simplified three-tier risk model maps directly to the pipeline routing:
+
+| Risk Level | RT Score | Route | Destination |
+|---|---|---|---|
+| **Red** | Both monitors flagged | `retain_event` | Customs queue |
+| **Amber** | One monitor flagged | `investigate_event` | Tax queue |
+| **Green** | Neither flagged | `release_event` | Auto-released to DB |
 
 ---
 
