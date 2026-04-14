@@ -1186,33 +1186,26 @@ function PipelineDiagram({ pipeline }) {
                   <div style={{ display: 'flex', alignItems: 'center', gap: 0, height: '100%', justifyContent: 'flex-end', transform: 'translateY(-18px)' }}>
                     {/* Entry fan-out — mirrors the fan-in on the right */}
                     <FanOutSVG height={RT_STACK_H} targetYs={[rtTopY, rtBotY]} width={24} />
-                    {/* Stacked RT1 + RT2 rows */}
+                    {/* Stacked RT1 + RT2 engine factories */}
                     <div style={{ display: 'flex', flexDirection: 'column', gap: RT_ROW_GAP }}>
-                      <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center' }}>
                         <FactoryNode icon="⚖️" label="RT Risk As. 1" description="VAT ratio deviation" sm
-                          tooltip="RT Risk Assessment 1 — flags transactions whose VAT-to-value ratio deviates from the supplier's historical baseline." />
-                        <Arrow />
-                        <BrokerNode label="RT Risk 1 Outcome" topicKey="RT_RISK_1_OUTCOME"
-                          count={ev.rt_risk_1_outcome} sm
-                          tooltip="RT_RISK_1_OUTCOME — one event per transaction with the VAT-ratio flag result.">
-                          <FlaggedBadge flagged={rf.rt_risk_1_flagged} total={ev.rt_risk_1_outcome} />
-                        </BrokerNode>
+                          tooltip="RT Risk Assessment 1 — flags transactions whose VAT-to-value ratio deviates from the supplier's historical baseline. Publishes to the unified RT Risk Outcome broker." />
                       </div>
-                      <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center' }}>
                         <FactoryNode icon="🔍" label="RT Risk As. 2" description="Watchlist lookup" sm
-                          tooltip="RT Risk Assessment 2 — flags transactions whose seller or route appears on the active watchlist." />
-                        <Arrow />
-                        <BrokerNode label="RT Risk 2 Outcome" topicKey="RT_RISK_2_OUTCOME"
-                          count={ev.rt_risk_2_outcome} sm
-                          tooltip="RT_RISK_2_OUTCOME — one event per transaction with the watchlist lookup result.">
-                          <FlaggedBadge flagged={rf.rt_risk_2_flagged} total={ev.rt_risk_2_outcome} />
-                        </BrokerNode>
+                          tooltip="RT Risk Assessment 2 — flags transactions whose seller or route appears on the active watchlist. Publishes to the unified RT Risk Outcome broker." />
                       </div>
                     </div>
-                    {/* Risk outcomes flow directly to the Release Factory
-                        via the unified RT Risk Outcome broker (no separate
-                        consolidation step — the Release Factory computes the
-                        score from all received engine outcomes). */}
+                    {/* Fan-in: both engines → single RT Risk Outcome broker */}
+                    <FanInSVG height={RT_STACK_H} inputYs={[rtTopY, rtBotY]} outputY={rtOutY} width={36} />
+                    {/* Single unified broker receiving outcomes from ALL risk engines */}
+                    <BrokerNode label="RT Risk Outcome" topicKey="RT_RISK_1_OUTCOME"
+                      count={(ev.rt_risk_1_outcome || 0) + (ev.rt_risk_2_outcome || 0)} sm
+                      tooltip="RT_RISK_OUTCOME — unified topic. Both risk engines publish here with an engine identifier. The Release Factory subscribes and computes a consolidated score (flagged/total) with confidence.">
+                      <FlaggedBadge flagged={(rf.rt_risk_1_flagged || 0) + (rf.rt_risk_2_flagged || 0)}
+                        total={(ev.rt_risk_1_outcome || 0) + (ev.rt_risk_2_outcome || 0)} />
+                    </BrokerNode>
                   </div>
                 </Zone>
               </div>
@@ -1243,12 +1236,10 @@ function PipelineDiagram({ pipeline }) {
                   count={ev.order_validation} sm width={OUT_BROKER_W}
                   tooltip="ORDER_VALIDATION — field-completeness outcome per order. Consumed by the Release Factory." />
               </div>
+              {/* RT Risk Outcome broker is now inside the RT zone above —
+                  this slot carries the arrow through to the Release Factory */}
               <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
-                <BrokerNode label="RT Risk Outcome" topicKey="RT_SCORE"
-                  count={ev.rt_score} sm width={OUT_BROKER_W}
-                  tooltip="RT_RISK_OUTCOME — unified risk outcome per transaction (score + confidence). The Release Factory computes the consolidated score from all received engine outcomes.">
-                  <ScoreBadges green={rf.rt_score_green} amber={rf.rt_score_amber} red={rf.rt_score_red} />
-                </BrokerNode>
+                <Arrow label="" />
               </div>
               <div style={{ height: AN_H, display: 'flex', alignItems: 'center' }}>
                 <BrokerNode label="Goods Arrival Notification" topicKey="ARRIVAL_NOTIFICATION"
