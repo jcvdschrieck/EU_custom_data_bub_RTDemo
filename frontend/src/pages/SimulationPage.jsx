@@ -1080,7 +1080,7 @@ function PipelineDiagram({ pipeline }) {
   // (Sales Order Validation / RT Score / Goods Arrival Notification)
   const OUT_BROKER_W = 170
 
-  // RT zone internal row geometry (two stacked broker rows + fan-in to consolidation)
+  // RT zone internal row geometry (two stacked broker rows, outcomes flow to Release Factory)
   const RT_ROW_H   = 84
   const RT_ROW_GAP = 10
   const RT_STACK_H = RT_ROW_H * 2 + RT_ROW_GAP    // 178
@@ -1209,11 +1209,10 @@ function PipelineDiagram({ pipeline }) {
                         </BrokerNode>
                       </div>
                     </div>
-                    {/* FanIn: 2 rows → Risk Score Consolidation */}
-                    <FanInSVG height={RT_STACK_H} inputYs={[rtTopY, rtBotY]} outputY={rtOutY} width={36} />
-                    {/* Risk Score Consolidation — horizontally to the right of the two assessment rows */}
-                    <FactoryNode icon="🔄" label="Risk Score Consolidation" description="GREEN / AMBER / RED" sm
-                      tooltip="Risk Score Consolidation — combines RT1 + RT2 into a single risk score: GREEN (none flagged), AMBER (one), RED (both)." />
+                    {/* Risk outcomes flow directly to the Release Factory
+                        via the unified RT Risk Outcome broker (no separate
+                        consolidation step — the Release Factory computes the
+                        score from all received engine outcomes). */}
                   </div>
                 </Zone>
               </div>
@@ -1245,9 +1244,9 @@ function PipelineDiagram({ pipeline }) {
                   tooltip="ORDER_VALIDATION — field-completeness outcome per order. Consumed by the Release Factory." />
               </div>
               <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
-                <BrokerNode label="RT Score" topicKey="RT_SCORE"
+                <BrokerNode label="RT Risk Outcome" topicKey="RT_SCORE"
                   count={ev.rt_score} sm width={OUT_BROKER_W}
-                  tooltip="RT_SCORE — consolidated GREEN / AMBER / RED risk score per transaction. Consumed by the Release Factory.">
+                  tooltip="RT_RISK_OUTCOME — unified risk outcome per transaction (score + confidence). The Release Factory computes the consolidated score from all received engine outcomes.">
                   <ScoreBadges green={rf.rt_score_green} amber={rf.rt_score_amber} red={rf.rt_score_red} />
                 </BrokerNode>
               </div>
@@ -1263,8 +1262,8 @@ function PipelineDiagram({ pipeline }) {
 
             {/* Release Factory — vertically centered at ROW1_H/2 to line up with the fan-in output */}
             <div style={{ height: ROW1_H, display: 'flex', alignItems: 'center' }}>
-              <FactoryNode icon="🎯" label="Release Factory" description="routes by score + validation" sm
-                tooltip="Release Factory — waits for RT Score + Sales Order Validation + Goods Arrival Notification on each transaction, then routes: GREEN→Release, RED→Retain, AMBER→Investigate." />
+              <FactoryNode icon="🎯" label="Release Factory" description="consolidates risk + routes" sm
+                tooltip="Release Factory — collects risk outcomes from all engines, computes a consolidated score (flagged/total, with confidence), then routes: score < 33% → Release, 33–66% → Investigate, > 66% → Retain. GREEN path waits for validation + arrival; RED fires immediately." />
             </div>
 
             {/* Fan-out: Release Factory → 3 event brokers.
@@ -1351,7 +1350,7 @@ const TOPIC_META = [
   { key: 'order_validation',                    label: 'Sales Order Validation',           factory: 'Sales Order Validation Factory',     color: '#1f7a3c' },
   { key: 'rt_risk_1_outcome',                   label: 'RT Risk 1 Outcome',                factory: 'Real-Time Risk Assessment 1',        color: '#6f42c1' },
   { key: 'rt_risk_2_outcome',                   label: 'RT Risk 2 Outcome',                factory: 'Real-Time Risk Assessment 2',        color: '#6f42c1' },
-  { key: 'rt_score',                            label: 'RT Score',                         factory: 'Risk Score Consolidation Factory',    color: '#e6820a' },
+  { key: 'rt_score',                            label: 'RT Risk Outcome',                  factory: 'Release Factory (consolidation)',      color: '#e6820a' },
   { key: 'arrival_notification',                label: 'Goods Arrival Notification',       factory: 'Goods Transport Factory',             color: '#e67e22' },
   { key: 'release_event',                       label: 'Sales Order Release',              factory: 'Release Factory (GREEN)',             color: '#1f7a3c' },
   { key: 'retain_event',                        label: 'Sales Order Retained',             factory: 'Retain Factory (RED)',                color: '#c0392b' },
