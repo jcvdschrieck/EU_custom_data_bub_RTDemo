@@ -29,6 +29,7 @@ class SimState:
         self.total_count: int   = 0
         self.recent: list[dict] = []              # last N transactions fired this session
         self._max_recent: int   = 200
+        self._reset_flag: bool  = False
 
     def reset(self) -> None:
         self.running    = False
@@ -37,6 +38,9 @@ class SimState:
         self.last_tick  = None
         self.fired_count = 0
         self.recent     = []
+        # Signal the simulation_loop to drop its cached _next_tx and
+        # re-read total_count from the DB on the next tick.
+        self._reset_flag = True
 
     def add_recent(self, tx: dict) -> None:
         self.recent.insert(0, tx)
@@ -94,6 +98,15 @@ async def simulation_loop(fire_callback) -> None:
 
     while True:
         await asyncio.sleep(0.05)
+
+        # Handle reset: drop the cached event and refresh the count
+        # so the loop re-reads from the freshly-reset DB.
+        if state._reset_flag:
+            state._reset_flag = False
+            _next_tx = None
+            _last_real = None
+            state.total_count = get_sim_counts()["total"]
+            continue
 
         if not state.running:
             # On pause: drop the wall-clock anchor so paused time isn't credited
