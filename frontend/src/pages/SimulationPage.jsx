@@ -595,32 +595,9 @@ function MiddleSection({ ev, rf, customs, tax, taxRunning, stored, newStored, H,
   const QUEUE_CX  = QUEUE_LEFT  + QUEUE_W  / 2
   const OFCR_CX   = OFCR_LEFT   + OFCR_W   / 2
 
-  // ── Arrival → Post-Inv Release supplementary arrow ───────────────────────
-  // The Post-Inv Release factory correlates Investigation Clearance + Order
-  // Validation + Arrival Notification. The OV/Clearance branches arrive via
-  // the Customs Officer release path; this draws the missing Arrival branch
-  // as a U-shape that exits the upper-band Arrival broker area, descends
-  // BELOW everything (Tax Office zone + VAT Agent + inter-zone arrows),
-  // runs horizontally under them, and rises back up into the Post-Inv
-  // Release block from below. Routing the arrow under the schema avoids
-  // crossing the Customs/Tax zones and the escalate / recommend arrows.
-  //
-  // ARRIVAL_START_X is the negative offset (in MiddleSection-local
-  // coordinates) of the FanIn spine corner where the existing Arrival arrow
-  // turns upward to feed Release Factory. Derived statically from the fixed
-  // upper-band widths between MiddleSection's left edge and the FanIn:
-  //   AUTOMATED brokers column (OUT_BROKER_W = 170)
-  // + FanOut SVG (48)
-  // + Release Factory wrapper (≈ 135 — sm factory + padding)
-  // + FanIn SVG (60), spine at width-8 = 52 from its right edge
-  // Start point ≈ -(170 + 48 + 135 + 60 - 52) ≈ -361.
-  const ARRIVAL_START_X = -361
-  const ARRIVAL_BELOW_Y = AGENT_BOTTOM + 24    // 16 px below the VAT Agent
-
-  // Effective canvas height — extends below H to accommodate the Tax row,
-  // the VAT Agent stacked below it, AND the arrival U-shape's horizontal
-  // leg that runs under everything.
-  const Heff = Math.max(H, ARRIVAL_BELOW_Y + 16)
+  // Effective canvas height — extends below H to accommodate the Tax row
+  // and the VAT Agent stacked below it.
+  const Heff = Math.max(H, AGENT_BOTTOM + 24)
 
   // ── Loop-back routing ────────────────────────────────────────────────────
   // Vertical legs MUST lie outside the after-Inv broker x range
@@ -787,20 +764,7 @@ function MiddleSection({ ev, rf, customs, tax, taxRunning, stored, newStored, H,
         <text x={OFCR_CX + CONSULT_DX + 4} y={(CONSULT_TOP + CONSULT_BOT) / 2}
               fontSize={9} fill={indigo} textAnchor="start" fontWeight={700} dominantBaseline="middle">verdict</text>
 
-        {/* Arrival Notification → Post-Inv Release supplementary input.
-            U-shape: starts at the FanIn corner where the existing Arrival
-            arrow turns up to Release Factory, descends BELOW the entire
-            bottom band (Customs zone + Tax zone + VAT Agent + inter-zone
-            arrows), runs right under them, then rises into the bottom edge
-            of the Post-Inv Release block. Routing under the schema keeps
-            the line clear of the escalate / recommend / consult arrows.
-            Drawn at negative x — relies on the SVG's overflow:visible. */}
-        <polyline
-          points={`${ARRIVAL_START_X},${Y_INV} ${ARRIVAL_START_X},${ARRIVAL_BELOW_Y} ${POSTINV_CX},${ARRIVAL_BELOW_Y} ${POSTINV_CX},${CUSTOMS_ROW_BOT}`}
-          stroke={grey} strokeWidth={stroke} fill="none" />
-        <Arrowhead x={POSTINV_CX} y={CUSTOMS_ROW_BOT} dir="up" />
-        <text x={ARRIVAL_START_X + 4} y={Y_INV - 6}
-              fontSize={9} fill="var(--text-muted)" textAnchor="start" fontWeight={700}>arrival</text>
+        {/* Arrival Notification → Post-Inv Release arrow removed (Goods Transport flow eliminated) */}
       </svg>
 
       {/* ── DB Store · Hub dashed zone (mirrors Order Validation / RT Risk / Transport on the left) ── */}
@@ -1057,14 +1021,12 @@ function PipelineDiagram({ pipeline }) {
   const taxRunning = pipeline?.tax_queue_agent_running ?? null
   const stored     = pipeline?.stored_count           ?? null
 
-  // Row 1: three parallel processing zones
-  // AN_H is taller so the Investigation Notification broker aligns
-  // horizontally with the Tax Listener in the MiddleSection.
-  const OV_H = 94, RT_H = 230, AN_H = 252, LGAP = 10
-  const ROW1_H = OV_H + LGAP + RT_H + LGAP + AN_H
+  // Row 1: two processing zones + Investigation event broker below
+  const OV_H = 94, RT_H = 230, INV_H = 94, LGAP = 10
+  const ROW1_H = OV_H + LGAP + RT_H + LGAP + INV_H
   const yOV = OV_H / 2
   const yRT = OV_H + LGAP + RT_H / 2
-  const yAN = OV_H + LGAP + RT_H + LGAP + AN_H / 2
+  const yINV = OV_H + LGAP + RT_H + LGAP + INV_H / 2
 
   // Shared width for the three top zones
   const ZONE_W = 380
@@ -1072,7 +1034,7 @@ function PipelineDiagram({ pipeline }) {
   // RT Risk As. 1, RT Risk As. 2, Goods Transport) so they're visually uniform.
   const FACTORY_W = 340
   // Shared width for the three row-1 output brokers
-  // (Sales Order Validation / RT Risk Outcome / Goods Arrival Notification)
+  // (Sales Order Validation / RT Risk Outcome)
   const OUT_BROKER_W = 170
 
   // RT zone internal row geometry (two stacked broker rows, outcomes flow to Release Factory)
@@ -1152,11 +1114,7 @@ function PipelineDiagram({ pipeline }) {
                 Assessment | dashed grey → Goods Transport (the spine segment
                 between Real-Time Risk Assessment and Goods Transport is
                 dashed too) */}
-            <FanOutMixedSVG height={ROW1_H} width={48} targets={[
-              { y: yOV, dashed: false },
-              { y: yRT, dashed: false },
-              { y: yAN, dashed: true  },
-            ]} />
+            <FanOutSVG height={ROW1_H} targetYs={[yOV, yRT]} width={48} />
 
             {/* Three parallel zones stacked — all at ZONE_W so Row 1 is visually aligned */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
@@ -1196,15 +1154,7 @@ function PipelineDiagram({ pipeline }) {
                 </Zone>
               </div>
 
-              <div style={{ height: AN_H, display: 'flex', alignItems: 'center' }}>
-                <Zone label="Goods Transport" style={{ width: ZONE_W, boxSizing: 'border-box' }}>
-                  <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
-                    <FactoryNode icon="🚢" label="Goods Transport"
-                      description="exp. delay ~60 s · unlimited concurrency" sm width={FACTORY_W}
-                      tooltip="Goods Transport / Arrival Notification — async per-order task with exponential-delay arrival (~60 s mean). Emits ARRIVAL_NOTIFICATION events." />
-                  </div>
-                </Zone>
-              </div>
+              {/* Goods Transport zone removed — flow eliminated */}
 
             </div>
 
@@ -1212,7 +1162,6 @@ function PipelineDiagram({ pipeline }) {
             <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
               <div style={{ height: OV_H,  display: 'flex', alignItems: 'center' }}><Arrow /></div>
               <div style={{ height: RT_H,  display: 'flex', alignItems: 'center' }}><Arrow /></div>
-              <div style={{ height: AN_H,  display: 'flex', alignItems: 'center' }}><Arrow /></div>
             </div>
 
             {/* Three output brokers — same width, same default blue */}
@@ -1230,25 +1179,20 @@ function PipelineDiagram({ pipeline }) {
                     total={(ev.rt_risk_1_outcome || 0) + (ev.rt_risk_2_outcome || 0)} />
                 </BrokerNode>
               </div>
-              <div style={{ height: AN_H, display: 'flex', alignItems: 'center' }}>
-                <BrokerNode label="Goods Arrival Notification" topicKey="ARRIVAL_NOTIFICATION"
-                  count={ev.arrival_notification} sm width={OUT_BROKER_W}
-                  tooltip="ARRIVAL_NOTIFICATION — emitted once goods arrive at destination. Required by the Release Factory." />
-              </div>
+              {/* Goods Arrival Notification broker removed */}
             </div>
 
-            {/* Fan-in: 3 output brokers → Release Factory */}
-            <FanInSVG height={ROW1_H} inputYs={[yOV, yRT, yAN]} outputY={ROW1_H / 2} width={60} />
+            {/* Fan-in: 2 output brokers → Release Factory */}
+            <FanInSVG height={ROW1_H} inputYs={[yOV, yRT]} outputY={ROW1_H / 2} width={60} />
 
             {/* Release Factory — vertically centered at ROW1_H/2 to line up with the fan-in output */}
             <div style={{ height: ROW1_H, display: 'flex', alignItems: 'center' }}>
               <FactoryNode icon="🎯" label="Release Factory" description="consolidates risk + routes" sm
-                tooltip="Release Factory — collects risk outcomes from all engines, computes a consolidated score (flagged/total, with confidence), then routes: score < 33% → Release, 33–66% → Investigate, > 66% → Retain. GREEN path waits for validation + arrival; RED fires immediately." />
+                tooltip="Release Factory — collects risk outcomes from all engines, computes a consolidated score (flagged/total, with confidence), then routes: score < 33% → Release, 33–66% → Investigate, > 66% → Retain. GREEN/AMBER paths wait for validation; RED fires immediately." />
             </div>
 
-            {/* Fan-out: Release Factory → 3 event brokers.
-                Target Ys match row-1 output brokers (yOV, yRT, yAN) so vertical spacing is consistent. */}
-            <FanOutSVG height={ROW1_H} targetYs={[yOV, yRT, yAN]} width={48} />
+            {/* Fan-out: Release Factory → 3 event brokers */}
+            <FanOutSVG height={ROW1_H} targetYs={[yOV, yRT, yINV]} width={48} />
 
             {/* Three event brokers — heights match row-1 zones so centers land at yOV / yRT / yAN */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
@@ -1262,7 +1206,7 @@ function PipelineDiagram({ pipeline }) {
                   count={ev.retain_event} accent="#c0392b" sm width={OUT_BROKER_W}
                   tooltip="Sales Order Retained — RED-path transactions stored with the suspicious flag set." />
               </div>
-              <div style={{ height: AN_H, display: 'flex', alignItems: 'center' }}>
+              <div style={{ height: INV_H, display: 'flex', alignItems: 'center' }}>
                 <BrokerNode label="Sales Order for Investigation" topicKey="INVESTIGATION_NOTIFICATION"
                   count={ev.investigate_event} accent="#e6820a" sm width={OUT_BROKER_W}
                   tooltip="Sales Order for Investigation — AMBER-path transactions handed off to the investigation sub-pipeline." />
@@ -1275,7 +1219,7 @@ function PipelineDiagram({ pipeline }) {
                 canvas sized so the band extends below ROW1_H to fit both rows. */}
             <MiddleSection ev={ev} rf={rf} customs={customs} tax={tax} taxRunning={taxRunning}
               stored={stored} newStored={newStored}
-              H={ROW1_H} yRel={yOV} yRet={yRT} yInv={yAN} />
+              H={ROW1_H} yRel={yOV} yRet={yRT} yInv={yINV} />
 
           </div>
 
@@ -1331,7 +1275,7 @@ const TOPIC_META = [
   { key: 'rt_risk_1_outcome',                   label: 'RT Risk 1 Outcome',                factory: 'Real-Time Risk Assessment 1',        color: '#6f42c1' },
   { key: 'rt_risk_2_outcome',                   label: 'RT Risk 2 Outcome',                factory: 'Real-Time Risk Assessment 2',        color: '#6f42c1' },
   { key: 'rt_score',                            label: 'RT Risk Outcome',                  factory: 'Release Factory (consolidation)',      color: '#e6820a' },
-  { key: 'arrival_notification',                label: 'Goods Arrival Notification',       factory: 'Goods Transport Factory',             color: '#e67e22' },
+  // arrival_notification removed (Goods Transport flow eliminated)
   { key: 'release_event',                       label: 'Sales Order Release',              factory: 'Release Factory (GREEN)',             color: '#1f7a3c' },
   { key: 'retain_event',                        label: 'Sales Order Retained',             factory: 'Retain Factory (RED)',                color: '#c0392b' },
   { key: 'investigate_event',                   label: 'Sales Order for Investigation',    factory: 'Investigate Dispatch Factory (AMBER)', color: '#e6820a' },

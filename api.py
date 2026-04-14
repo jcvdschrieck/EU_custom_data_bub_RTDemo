@@ -123,7 +123,7 @@ from lib.broker import (
     broker,
     SALES_ORDER_EVENT, RT_RISK_OUTCOME,
     RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME, RT_SCORE,  # legacy counters
-    ORDER_VALIDATION, ARRIVAL_NOTIFICATION,
+    ORDER_VALIDATION,
     RELEASE_EVENT, RETAIN_EVENT, INVESTIGATE_EVENT,
     AGENT_RETAIN_EVENT, AGENT_RELEASE_EVENT, RELEASE_AFTER_INVESTIGATION_EVENT,
     AI_ANALYSIS_EVENT,
@@ -390,37 +390,7 @@ async def _order_validation_factory() -> None:
         _track_factory_task(_validate(tx))
 
 
-# ── Arrival Notification Factory ─────────────────────────────────────────────
-
-async def _arrival_notification_factory() -> None:
-    """
-    Subscribes to Sales-order Event Broker.
-    For each sales order, spawns an independent asyncio task that waits an
-    exponentially-distributed delay (mean 30 sim-seconds) before publishing
-    to ARRIVAL_NOTIFICATION. The wait is expressed in sim-time via
-    _sleep_until_sim_time so arrivals stay tightly coupled to their orders
-    in sim-time and naturally pause/resume/reset alongside the simulation.
-
-    Unlimited concurrency — each order is scheduled independently; no order
-    ever blocks behind another in this factory.
-    """
-    import random
-    from lib.message_factory import build_arrival_notification
-    from lib.simulator import state as _state
-
-    MEAN_SIM_SECONDS = 30.0
-
-    async def _schedule(tx: dict) -> None:
-        sim_delay = random.expovariate(1.0 / MEAN_SIM_SECONDS)
-        target    = _state.sim_time + timedelta(seconds=sim_delay)
-        await _sleep_until_sim_time(target)
-        payload = build_arrival_notification(tx, _state.sim_time)
-        await broker.publish(ARRIVAL_NOTIFICATION, payload)
-
-    q = broker.subscribe(SALES_ORDER_EVENT)
-    while True:
-        tx = await q.get()
-        _track_factory_task(_schedule(tx))
+# ── (Arrival Notification Factory removed — Goods Transport flow eliminated.) ──
 
 
 # ── Release Factory (unified routing: consolidation + release/retain/investigate) ─
@@ -452,7 +422,6 @@ async def _release_factory() -> None:
     # Per-transaction buffer: tx_id → {
     #   "risk_outcomes": {engine_name: item, ...},
     #   "validation": item | None,
-    #   "arrival": item | None,
     #   "routed": bool,
     # }
     _buffer: dict[str, dict] = {}
@@ -461,7 +430,6 @@ async def _release_factory() -> None:
         return _buffer.setdefault(tx_id, {
             "risk_outcomes": {},
             "validation": None,
-            "arrival": None,
             "routed": False,
         })
 
@@ -564,10 +532,10 @@ async def _release_factory() -> None:
             _buffer.pop(tx_id, None)
             return
 
-        # ── GREEN path: release — needs validation + arrival ──
+        # ── GREEN path: release — needs validation ──
         if route == "green":
-            if entry["validation"] is None or entry["arrival"] is None:
-                return   # wait for both
+            if entry["validation"] is None:
+                return   # wait for validation
             entry["routed"] = True
             val = entry["validation"]
             await broker.publish(RELEASE_EVENT, {
@@ -600,23 +568,7 @@ async def _release_factory() -> None:
             entry["validation"] = item
             await _try_route(tx_id)
 
-    # ── Drain: arrival notification ──
-    async def _drain_arrival() -> None:
-        q = broker.subscribe(ARRIVAL_NOTIFICATION)
-        while True:
-            item = await q.get()
-            tx_id = (
-                item.get("orderIdentifier")
-                or item.get("transaction_id")
-                or item.get("sales_order_id")
-                or ((item.get("HouseConsignment") or {}).get("Order") or {}).get("orderIdentifier")
-            )
-            if tx_id:
-                entry = _get(tx_id)
-                entry["arrival"] = item
-                await _try_route(tx_id)
-
-    await asyncio.gather(_drain_risk(), _drain_validation(), _drain_arrival())
+    await asyncio.gather(_drain_risk(), _drain_validation())
 
 
 # ── Two-entity manual workflow (Customs Office + Tax Office) ─────────────────
@@ -802,19 +754,18 @@ async def _tax_listener_factory() -> None:
 
 async def _release_after_investigation_factory() -> None:
     """
-    Subscribes to AGENT_RELEASE_EVENT, ORDER_VALIDATION, ARRIVAL_NOTIFICATION.
-    Correlates all three by order identifier → RELEASE_AFTER_INVESTIGATION_EVENT.
+    Subscribes to AGENT_RELEASE_EVENT and ORDER_VALIDATION.
+    Correlates both by order identifier → RELEASE_AFTER_INVESTIGATION_EVENT.
 
-    Validation and arrival typically arrive well before the agent verdict, so
-    they are pre-buffered and matched when AGENT_RELEASE_EVENT eventually arrives.
+    Validation typically arrives well before the agent verdict, so it is
+    pre-buffered and matched when AGENT_RELEASE_EVENT eventually arrives.
     """
     _buffer:          dict[str, dict] = {}
     _pre_validation:  dict[str, dict] = {}
-    _pre_arrival:     dict[str, dict] = {}
 
     async def _emit_if_ready(tx_id: str) -> None:
         entry = _buffer.get(tx_id, {})
-        if "agent_release" not in entry or "validation" not in entry or "arrival" not in entry:
+        if "agent_release" not in entry or "validation" not in entry:
             return
         del _buffer[tx_id]
         ar  = entry["agent_release"]
@@ -835,8 +786,6 @@ async def _release_after_investigation_factory() -> None:
             _buffer[tx_id] = {"agent_release": item}
             if tx_id in _pre_validation:
                 _buffer[tx_id]["validation"] = _pre_validation.pop(tx_id)
-            if tx_id in _pre_arrival:
-                _buffer[tx_id]["arrival"] = _pre_arrival.pop(tx_id)
             await _emit_if_ready(tx_id)
 
     async def _drain_validation() -> None:
@@ -850,25 +799,7 @@ async def _release_after_investigation_factory() -> None:
             else:
                 _pre_validation[tx_id] = item
 
-    async def _drain_arrival() -> None:
-        q = broker.subscribe(ARRIVAL_NOTIFICATION)
-        while True:
-            item  = await q.get()
-            tx_id = (
-                item.get("orderIdentifier")
-                or item.get("transaction_id")
-                or item.get("sales_order_id")
-                or ((item.get("HouseConsignment") or {}).get("Order") or {}).get("orderIdentifier")
-            )
-            if not tx_id:
-                continue
-            if tx_id in _buffer:
-                _buffer[tx_id]["arrival"] = item
-                await _emit_if_ready(tx_id)
-            else:
-                _pre_arrival[tx_id] = item
-
-    await asyncio.gather(_drain_agent_release(), _drain_validation(), _drain_arrival())
+    await asyncio.gather(_drain_agent_release(), _drain_validation())
 
 
 # ── DB Store Worker (all terminal event topics) ───────────────────────────────
@@ -1214,7 +1145,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_RT_risk_monitoring_2_factory())
     # Consolidation is now handled inside _release_factory (unified routing).
     asyncio.create_task(_order_validation_factory())
-    asyncio.create_task(_arrival_notification_factory())
+    # _arrival_notification_factory removed (Goods Transport flow eliminated)
     asyncio.create_task(_release_factory())
     # _retain_factory and _investigate_dispatch_factory are removed —
     # the unified _release_factory handles all three routes.
@@ -1310,7 +1241,7 @@ def _compute_sim_state_snapshot() -> dict:
     # ── Pipeline block (same shape as GET /api/simulation/pipeline) ──
     topics = [
         SALES_ORDER_EVENT, RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME,
-        RT_SCORE, ORDER_VALIDATION, ARRIVAL_NOTIFICATION,
+        RT_SCORE, ORDER_VALIDATION,
         RELEASE_EVENT, RETAIN_EVENT, INVESTIGATE_EVENT,
         AGENT_RETAIN_EVENT, AGENT_RELEASE_EVENT, RELEASE_AFTER_INVESTIGATION_EVENT,
     ]
@@ -1849,7 +1780,7 @@ def sim_pipeline():
     from lib.broker import broker as _broker
     topics = [
         SALES_ORDER_EVENT, RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME,
-        RT_SCORE, ORDER_VALIDATION, ARRIVAL_NOTIFICATION,
+        RT_SCORE, ORDER_VALIDATION,
         RELEASE_EVENT, RETAIN_EVENT, INVESTIGATE_EVENT,
         AGENT_RETAIN_EVENT, AGENT_RELEASE_EVENT, RELEASE_AFTER_INVESTIGATION_EVENT,
     ]
