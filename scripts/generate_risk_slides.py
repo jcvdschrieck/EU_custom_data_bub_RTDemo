@@ -146,30 +146,39 @@ def main():
         "Risk Monitoring Rules",
         "EU Custom Data Hub — Real-Time Risk Assessment")
 
+    # ══════════════════════════════════════════════════════════════════
+    # Shared slide structure for each risk engine:
+    #   LEFT:   Functional Logic (description + rationale) + Algorithm
+    #   LEFT-BOTTOM: Parameters table
+    #   RIGHT:  Seeded Scenario
+    # ══════════════════════════════════════════════════════════════════
+
     # ── Slide 2: RT Risk Monitoring 1 — VAT Ratio Deviation ────────────
     s2 = _add_content_slide(prs, "RT Risk Monitoring 1 — VAT Ratio Deviation")
 
-    _add_bullet_box(s2, 0.5, 1.1, 5.5, 2.5, [
+    _add_bullet_box(s2, 0.5, 1.1, 5.5, 1.6, [
         ("Engine ID: vat_ratio", 0),
-        ("Detects sudden shifts in a supplier's VAT-to-value ratio for a specific destination country", 0),
+        ("", 0),
+        ("Functional Logic:", 0),
+        ("Detects sudden shifts in a supplier's VAT-to-value ratio per destination country — a strong statistical indicator of VAT fraud.", 1),
+        ("The check runs for all (supplier, country) pairs. Any pair whose recent ratio deviates beyond the threshold triggers a 7-day alarm.", 1),
         ("", 0),
         ("Algorithm:", 0),
         ("Compute VAT/value ratio for (seller, buyer_country) over the last 7 days", 1),
         ("Compare to the same ratio over the preceding 8 weeks (days −63 to −7)", 1),
-        ("If deviation > 25% of the historical ratio → raise alarm (7-day expiry)", 1),
-        ("While alarm is active, tag all new transactions from the same pair as suspicious", 1),
-    ], font_size=11)
+        ("If |current − historical| / historical > 25% → raise alarm (7-day expiry)", 1),
+        ("While alarm is active, flag all new transactions from the same pair", 1),
+    ], font_size=10)
 
-    _add_table(s2, 0.5, 3.8, 5.5, [
-        ["Parameter", "Value", "Description"],
-        ["MIN_CURRENT_TX", "3", "Min transactions in 7-day window"],
-        ["MIN_HISTORICAL_TX", "5", "Min transactions in 8-week baseline"],
-        ["DEVIATION_THRESHOLD", "25%", "Trigger threshold"],
-        ["SUSPICIOUS_COUNTRIES", "{IE}", "Countries entering suspicious queue"],
-    ], col_widths=[2.2, 1.0, 2.3])
+    _add_table(s2, 0.5, 3.7, 5.5, [
+        ["Parameter", "Value", "Role"],
+        ["MIN_CURRENT_TX", "3", "Min txns in 7-day window (prevents false positives from tiny samples)"],
+        ["MIN_HISTORICAL_TX", "5", "Min txns in 8-week baseline (ensures meaningful reference ratio)"],
+        ["DEVIATION_THRESHOLD", "25%", "How far the 7-day ratio must deviate from baseline to trigger"],
+    ], col_widths=[2.0, 0.8, 2.7])
 
-    # Scenario box on the right
-    txBox = s2.shapes.add_textbox(Inches(6.3), Inches(1.1), Inches(3.3), Inches(3.0))
+    # Seeded Scenario (right side)
+    txBox = s2.shapes.add_textbox(Inches(6.3), Inches(1.1), Inches(3.3), Inches(3.5))
     tf = txBox.text_frame
     tf.word_wrap = True
     p = tf.paragraphs[0]
@@ -186,7 +195,7 @@ def main():
         "",
         "7-day VAT ratio drops from ~19% to ~0%, far exceeding the 25% threshold.",
         "",
-        "Alarm fires on the first affected transaction.",
+        "Alarm fires on the first affected transaction. All subsequent SUP001→IE transactions are flagged for 7 days.",
     ]:
         p2 = tf.add_paragraph()
         run2 = p2.add_run()
@@ -198,50 +207,56 @@ def main():
     # ── Slide 3: RT Risk Monitoring 2 — Watchlist ──────────────────────
     s3 = _add_content_slide(prs, "RT Risk Monitoring 2 — Supplier/Origin Watchlist")
 
-    _add_bullet_box(s3, 0.5, 1.1, 5.5, 2.0, [
+    _add_bullet_box(s3, 0.5, 1.1, 5.5, 1.6, [
         ("Engine ID: watchlist", 0),
-        ("Flags transactions from known-suspicious supplier × country-of-origin pairs", 0),
+        ("", 0),
+        ("Functional Logic:", 0),
+        ("Flags transactions from known-suspicious supplier × country-of-origin pairs. Complements the statistical VAT ratio check with a rule-based intelligence layer for cases where a supplier is high-risk regardless of current VAT behaviour.", 1),
+        ("The watchlist is editable (lib/watchlist.py) — changes take effect immediately, no restart needed.", 1),
         ("", 0),
         ("Algorithm:", 0),
         ("Look up (seller_id, seller_country) in the WATCHLIST set", 1),
         ("If present → flag the transaction", 1),
         ("If not → clear", 1),
-        ("", 0),
-        ("Simple binary lookup — no statistical analysis", 0),
-        ("Editable in lib/watchlist.py, takes effect immediately", 0),
-    ], font_size=11)
+    ], font_size=10)
 
     _add_table(s3, 0.5, 3.5, 5.5, [
-        ["Seller ID", "Country", "Supplier Name"],
-        ["SUP001", "DE", "TechZone GmbH"],
-        ["SUP002", "FR", "FashionHub Paris"],
-        ["SUP005", "NL", "SportsPro Amsterdam"],
-    ], col_widths=[1.5, 1.0, 3.0])
+        ["Parameter", "Value", "Role"],
+        ["WATCHLIST", "frozenset of (seller_id, seller_country) tuples", "Static lookup table of monitored pairs"],
+        ["Lookup type", "Binary (match / no match)", "No statistical analysis — instant O(1) check"],
+    ], col_widths=[1.5, 2.5, 1.5])
 
-    # Note box
-    txBox = s3.shapes.add_textbox(Inches(6.3), Inches(1.1), Inches(3.3), Inches(2.5))
+    # Seeded Scenario (right side)
+    txBox = s3.shapes.add_textbox(Inches(6.3), Inches(1.1), Inches(3.3), Inches(3.5))
     tf = txBox.text_frame
     tf.word_wrap = True
     p = tf.paragraphs[0]
     run = p.add_run()
-    run.text = "Design rationale"
+    run.text = "Seeded Scenario"
     run.font.size = Pt(14)
     run.font.bold = True
     run.font.color.rgb = EU_BLUE
     for text in [
         "",
-        "Covers scenarios where intelligence identifies a supplier as high-risk regardless of their current VAT behaviour.",
+        "Pre-configured watchlist entries:",
         "",
-        "Complements the statistical VAT ratio check with a rule-based layer.",
+        "• SUP001 (DE) — TechZone GmbH",
+        "   Overlaps with the VAT fraud scenario",
         "",
-        "Adding new entries requires no code change — just edit the WATCHLIST set.",
+        "• SUP002 (FR) — FashionHub Paris",
+        "   Known suspicious supplier",
+        "",
+        "• SUP005 (NL) — SportsPro Amsterdam",
+        "   Known suspicious supplier",
+        "",
+        "Any transaction from these (seller, country) pairs is automatically flagged.",
     ]:
         p2 = tf.add_paragraph()
         run2 = p2.add_run()
         run2.text = text
         run2.font.size = Pt(10)
-        run2.font.color.rgb = DARK_TEXT
-        p2.space_after = Pt(2)
+        run2.font.color.rgb = DARK_TEXT if text else SUBTLE_GREY
+        p2.space_after = Pt(1)
 
     # ── Slide 4: Risk Score Consolidation ──────────────────────────────
     s4 = _add_content_slide(prs, "Risk Score, Categories & Confidence")
