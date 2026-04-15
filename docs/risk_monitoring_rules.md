@@ -46,12 +46,15 @@ For each incoming Sales Order:
 
 ### Parameters
 
-| Parameter | Value | Description |
+| Parameter | Value | Role |
 |---|---|---|
-| `MIN_CURRENT_TX` | 3 | Minimum transactions in the 7-day window |
-| `MIN_HISTORICAL_TX` | 5 | Minimum transactions in the 8-week baseline |
-| `DEVIATION_THRESHOLD` | 0.25 (25%) | Trigger threshold |
-| `SUSPICIOUS_COUNTRIES` | `{"IE"}` | Only Ireland-bound transactions enter the suspicious queue |
+| `MIN_CURRENT_TX` | 3 | The 7-day window must contain at least 3 transactions for this (supplier, country) pair before the check runs. Prevents false positives from tiny samples (e.g. 1 transaction with an unusual rate). If fewer → no alarm, return None. |
+| `MIN_HISTORICAL_TX` | 5 | The 8-week baseline must contain at least 5 transactions. You need enough history to establish a meaningful reference ratio. If fewer → no alarm, return None. |
+| `DEVIATION_THRESHOLD` | 0.25 (25%) | The 7-day ratio must deviate by more than 25% of the historical ratio to trigger. E.g. if the 8-week ratio is 0.20 (20% VAT), the 7-day ratio must be below 0.15 or above 0.25 to fire. |
+
+The check runs for **all** (supplier, buyer_country) pairs — no country
+filter is applied. Any pair whose 7-day ratio deviates beyond the
+threshold triggers an alarm.
 
 ### Seeded scenario
 
