@@ -997,6 +997,47 @@ function KpiStrip({ pipeline }) {
 
 function PipelineDiagram({ pipeline }) {
   const pipelineRef = useRef(null)
+  const entryRef = useRef(null)
+  const ctRef = useRef(null)
+  const dbStoreRef = useRef(null)
+  const invOutcomeRef = useRef(null)
+  const containerRef = useRef(null)
+  const [overlayPaths, setOverlayPaths] = useState(null)
+
+  // Measure element positions and compute SVG overlay paths
+  useEffect(() => {
+    const update = () => {
+      const container = containerRef.current
+      const entry = entryRef.current
+      const ct = ctRef.current
+      const dbStore = dbStoreRef.current
+      const invOut = invOutcomeRef.current
+      if (!container || !entry || !ct) return
+      const cRect = container.getBoundingClientRect()
+      const eRect = entry.getBoundingClientRect()
+      const ctRect = ct.getBoundingClientRect()
+      // Entry center-right → above pipeline → C&T center-top
+      const ex = eRect.right - cRect.left
+      const ey = eRect.top + eRect.height / 2 - cRect.top
+      const ctx = ctRect.left + ctRect.width / 2 - cRect.left
+      const cty = ctRect.top - cRect.top
+      // DB Store + Investigation Outcome positions
+      let dbx = 0, dby = 0, ix = 0, iy = 0
+      if (dbStore && invOut) {
+        const dbRect = dbStore.getBoundingClientRect()
+        const iRect = invOut.getBoundingClientRect()
+        dbx = dbRect.left - cRect.left
+        dby = dbRect.top + dbRect.height / 2 - cRect.top
+        ix = iRect.right - cRect.left
+        iy = iRect.top + iRect.height / 2 - cRect.top
+      }
+      setOverlayPaths({ ex, ey, ctx, cty, dbx, dby, ix, iy })
+    }
+    update()
+    const id = setInterval(update, 2000)
+    return () => clearInterval(id)
+  })
+
   // Sync the top scrollbar spacer width with the pipeline content width
   useEffect(() => {
     const syncWidth = () => {
@@ -1099,48 +1140,22 @@ function PipelineDiagram({ pipeline }) {
               With center alignment the LEFT side would shift downward by
               (Heff - ROW1_H) / 2 and break alignment with MiddleSection's absolute
               children. */}
-          {/* Sales Order Event → C&T Risk Management: dashed L-shaped arrow.
-              Horizontal runway above the pipeline with a label. The fan-out's
-              dashed top branch connects to the left end; a downward tick on the
-              right end visually points into C&T Risk Management below. */}
-          <div style={{ height: 20, display: 'flex', alignItems: 'center',
-                        borderBottom: '1.5px dashed #6366f1', marginLeft: 70,
-                        marginRight: 200, marginBottom: 0, position: 'relative' }}>
-            <span style={{ fontSize: 8, color: '#6366f1', fontWeight: 700,
-                           position: 'absolute', top: 0, left: '35%',
-                           background: '#fff', padding: '0 6px' }}>
-              Sales Order Event → C&T Risk Management
-            </span>
-            {/* Downward arrow at the right end */}
-            <svg width="10" height="10" style={{ position: 'absolute', right: -5, bottom: -10 }}>
-              <polygon points="0,0 10,0 5,8" fill="#6366f1" />
-            </svg>
-            {/* Upward connection from fan-out at the left end */}
-            <svg width="2" height="10" style={{ position: 'absolute', left: 0, top: -10 }}>
-              <line x1="1" y1="0" x2="1" y2="10" stroke="#6366f1" strokeWidth="1.5" strokeDasharray="4 2" />
-            </svg>
-          </div>
-
-          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 0, position: 'relative' }}>
+          <div ref={containerRef} style={{ display: 'flex', alignItems: 'flex-start', gap: 0, position: 'relative' }}>
 
             {/* Entry Broker — centered at the midpoint between the two fan-out
                 targets (yOV and yRT) so it sits visually between both arrows. */}
             <div style={{ height: ROW1_H, display: 'flex', alignItems: 'center',
                           paddingTop: (yOV + yRT) / 2 - ROW1_H / 2 }}>
               <Zone label="Entry">
-                <BrokerNode label="Sales-order Event" topicKey="SALES_ORDER"
-                  count={ev.sales_order_event} queueSize={q.sales_order_event} sm />
+                <div ref={entryRef}>
+                  <BrokerNode label="Sales-order Event" topicKey="SALES_ORDER"
+                    count={ev.sales_order_event} queueSize={q.sales_order_event} sm />
+                </div>
               </Zone>
             </div>
 
-            {/* FanOut: Entry → Sales Order Validation + Real-Time Risk Assessment
-                + a third branch going UP that will route across the top to C&T Risk Management.
-                The third target is at y=0 (top of the container), drawn as a dashed line. */}
-            <FanOutMixedSVG height={ROW1_H} width={48} targets={[
-              { y: 0,   dashed: true  },
-              { y: yOV, dashed: false },
-              { y: yRT, dashed: false },
-            ]} />
+            {/* FanOut: Entry → Sales Order Validation + Real-Time Risk Assessment */}
+            <FanOutSVG height={ROW1_H} targetYs={[yOV, yRT]} width={48} />
 
             {/* Three parallel zones stacked — all at ZONE_W so Row 1 is visually aligned */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
@@ -1242,13 +1257,13 @@ function PipelineDiagram({ pipeline }) {
             {/* Subscribers: C&T Risk Management (top, purple) + DB Store Factory (bottom) */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
               <div style={{ height: OV_H, display: 'flex', alignItems: 'center' }}>
-                <FactoryNode icon="🏛️" label="C&T Risk Management" description="acts on retain + investigate" sm
+                <div ref={ctRef}><FactoryNode icon="🏛️" label="C&T Risk Management" description="acts on retain + investigate" sm
                   accent="#6366f1"
-                  tooltip="Custom & Tax Risk Management System — subscribes to Assessment Outcome (retain + investigate routes) and Sales Order Event. Produces Investigation Outcome events." />
+                  tooltip="Custom & Tax Risk Management System — subscribes to Assessment Outcome (retain + investigate routes) and Sales Order Event. Produces Investigation Outcome events." /></div>
               </div>
               <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
-                <FactoryNode icon="💾" label="DB Store Factory" description="stores release + investigation outcomes" sm
-                  tooltip="DB Store Factory — subscribes to Assessment Outcome (release route), Investigation Outcome, and Sales Order Event. Persists to european_custom.db." />
+                <div ref={dbStoreRef}><FactoryNode icon="💾" label="DB Store Factory" description="stores release + investigation outcomes" sm
+                  tooltip="DB Store Factory — subscribes to Assessment Outcome (release route), Investigation Outcome, and Sales Order Event. Persists to european_custom.db." /></div>
               </div>
             </div>
 
@@ -1261,9 +1276,9 @@ function PipelineDiagram({ pipeline }) {
             {/* Output: Investigation Outcome (top) + DB cylinder (bottom) */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
               <div style={{ height: OV_H, display: 'flex', alignItems: 'center' }}>
-                <BrokerNode label="Investigation Outcome" topicKey="INVESTIGATION_OUTCOME"
+                <div ref={invOutcomeRef}><BrokerNode label="Investigation Outcome" topicKey="INVESTIGATION_OUTCOME"
                   count={ev.investigation_outcome || 0} sm width={OUT_BROKER_W}
-                  tooltip="INVESTIGATION_OUTCOME — produced by the C&T Risk Management system for retain and investigate routes. Consumed by the DB Store Factory." />
+                  tooltip="INVESTIGATION_OUTCOME — produced by the C&T Risk Management system for retain and investigate routes. Consumed by the DB Store Factory." /></div>
               </div>
               <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
                 <DBSinkNode count={stored} newCount={newStored}
@@ -1271,26 +1286,55 @@ function PipelineDiagram({ pipeline }) {
               </div>
             </div>
 
-            {/* Return arrow: Investigation Outcome → DB Store Factory.
-                Vertical arrow connecting the two rows on the right side. */}
-            {(() => {
-              const arrowH = OV_H / 2 + LGAP + RT_H / 2
-              return (
-                <div style={{ marginLeft: 6, display: 'flex', alignItems: 'center', height: ROW1_H,
-                              paddingTop: yOV }}>
-                  <svg width="28" height={arrowH} style={{ overflow: 'visible' }}>
-                    <line x1="14" y1="0" x2="14" y2={arrowH - 8}
-                          stroke="#868e96" strokeWidth="1.5" />
-                    <polygon points={`8,${arrowH - 8} 20,${arrowH - 8} 14,${arrowH}`}
+            {/* SVG overlay: subscription arrows that loop back to earlier components */}
+            {overlayPaths && (
+              <svg style={{ position: 'absolute', left: 0, top: 0, width: '100%', height: '100%',
+                            pointerEvents: 'none', overflow: 'visible' }}>
+                {/* 1. Sales Order Event → C&T Risk Management (L-shape: up, right, down) */}
+                <polyline
+                  points={`${overlayPaths.ex},${overlayPaths.ey} ${overlayPaths.ex},-16 ${overlayPaths.ctx},-16 ${overlayPaths.ctx},${overlayPaths.cty}`}
+                  stroke="#6366f1" strokeWidth="1.5" strokeDasharray="6 3" fill="none" />
+                <polygon points={`${overlayPaths.ctx - 4},${overlayPaths.cty - 2} ${overlayPaths.ctx + 4},${overlayPaths.cty - 2} ${overlayPaths.ctx},${overlayPaths.cty + 4}`}
+                         fill="#6366f1" />
+                <text x={(overlayPaths.ex + overlayPaths.ctx) / 2} y={-22}
+                      textAnchor="middle" fontSize="8" fill="#6366f1" fontWeight="600">
+                  Sales Order Event → C&amp;T Risk Management
+                </text>
+
+                {/* 2. Investigation Outcome → DB Store Factory (vertical right side) */}
+                {overlayPaths.ix > 0 && (
+                  <>
+                    <polyline
+                      points={`${overlayPaths.ix + 4},${overlayPaths.iy} ${overlayPaths.ix + 20},${overlayPaths.iy} ${overlayPaths.ix + 20},${overlayPaths.dby} ${overlayPaths.dbx},${overlayPaths.dby}`}
+                      stroke="#868e96" strokeWidth="1.5" fill="none" />
+                    <polygon points={`${overlayPaths.dbx + 6},${overlayPaths.dby - 4} ${overlayPaths.dbx + 6},${overlayPaths.dby + 4} ${overlayPaths.dbx},${overlayPaths.dby}`}
                              fill="#868e96" />
-                    <text x="3" y={arrowH / 2} fontSize="7" fill="#868e96"
-                          fontWeight="600" writingMode="tb">
-                      Inv→DB
+                    <text x={overlayPaths.ix + 24} y={(overlayPaths.iy + overlayPaths.dby) / 2 + 3}
+                          fontSize="7" fill="#868e96" fontWeight="600" writingMode="tb">
+                      Inv Outcome → DB Store
                     </text>
-                  </svg>
-                </div>
-              )
-            })()}
+                  </>
+                )}
+
+                {/* 3. Sales Order Event → DB Store Factory (L-shape: down, right, up) */}
+                {overlayPaths.dbx > 0 && (() => {
+                  const belowY = overlayPaths.dby + 40
+                  return (
+                    <>
+                      <polyline
+                        points={`${overlayPaths.ex},${overlayPaths.ey} ${overlayPaths.ex},${belowY} ${overlayPaths.dbx + 10},${belowY} ${overlayPaths.dbx + 10},${overlayPaths.dby + 16}`}
+                        stroke="#868e96" strokeWidth="1.5" strokeDasharray="6 3" fill="none" />
+                      <polygon points={`${overlayPaths.dbx + 6},${overlayPaths.dby + 18} ${overlayPaths.dbx + 14},${overlayPaths.dby + 18} ${overlayPaths.dbx + 10},${overlayPaths.dby + 12}`}
+                               fill="#868e96" />
+                      <text x={(overlayPaths.ex + overlayPaths.dbx) / 2} y={belowY - 4}
+                            textAnchor="middle" fontSize="8" fill="#868e96" fontWeight="600">
+                        Sales Order Event → DB Store Factory
+                      </text>
+                    </>
+                  )
+                })()}
+              </svg>
+            )}
 
           </div>
 
