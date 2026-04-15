@@ -277,7 +277,11 @@ def init_european_custom_db() -> None:
 
 
 def init_investigation_db() -> None:
-    """Create the Sales_Order_Case table in the investigation database."""
+    """Create the 3-table case dataset (Sales_Order + Sales_Order_Risk +
+    Sales_Order_Case) in investigation.db. These mirror the data model used
+    by the data hub and give Revenue Guardian a self-contained store."""
+    _init_ddl(INVESTIGATION_DB, _SALES_ORDER_DDL)
+    _init_ddl(INVESTIGATION_DB, _SALES_ORDER_RISK_DDL)
     _init_ddl(INVESTIGATION_DB, _SALES_ORDER_CASE_DDL)
 
 
@@ -971,11 +975,134 @@ def update_case(case_id: str, updates: dict) -> bool:
 
 
 def reset_cases() -> None:
-    """Clear all Sales_Order_Case rows (called on simulation reset)."""
+    """Clear all 3 case-side tables in investigation.db (simulation reset)."""
     conn = _connect(INVESTIGATION_DB)
     with conn:
         conn.execute("DELETE FROM Sales_Order_Case")
+        conn.execute("DELETE FROM Sales_Order_Risk")
+        conn.execute("DELETE FROM Sales_Order")
     conn.close()
+
+
+# ── Atomic 3-row insert into investigation.db ────────────────────────────────
+#
+# Used by the C&T Risk Management Factory when a retain/investigate
+# ASSESSMENT_OUTCOME arrives. All three rows succeed or none do.
+
+def upsert_investigation_set(so_row: dict, sor_row: dict, soc_row: dict) -> None:
+    """Atomic insert of Sales_Order + Sales_Order_Risk + Sales_Order_Case
+    into investigation.db. Single transaction."""
+    conn = _connect(INVESTIGATION_DB)
+    try:
+        with conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO Sales_Order (
+                    Sales_Order_ID, Sales_Order_Business_Key,
+                    HS_Product_Category, Product_Description, Product_Value,
+                    VAT_Rate, VAT_Fee, Seller_Name,
+                    Country_Origin, Country_Destination,
+                    Status, Update_time, Updated_by
+                ) VALUES (
+                    :Sales_Order_ID, :Sales_Order_Business_Key,
+                    :HS_Product_Category, :Product_Description, :Product_Value,
+                    :VAT_Rate, :VAT_Fee, :Seller_Name,
+                    :Country_Origin, :Country_Destination,
+                    :Status, :Update_time, :Updated_by
+                )
+            """, so_row)
+            conn.execute("""
+                INSERT OR REPLACE INTO Sales_Order_Risk (
+                    Sales_Order_Risk_ID, Sales_Order_Business_Key,
+                    Risk_Type, Overall_Risk_Score, Overall_Risk_Level,
+                    Seller_Risk_Score, Country_Risk_Score,
+                    Product_Category_Risk_Score, Manufacturer_Risk_Score,
+                    Confidence_Score, Overall_Risk_Description,
+                    Proposed_Risk_Action, Risk_Comment,
+                    Evaluation_by, Update_time, Updated_by
+                ) VALUES (
+                    :Sales_Order_Risk_ID, :Sales_Order_Business_Key,
+                    :Risk_Type, :Overall_Risk_Score, :Overall_Risk_Level,
+                    :Seller_Risk_Score, :Country_Risk_Score,
+                    :Product_Category_Risk_Score, :Manufacturer_Risk_Score,
+                    :Confidence_Score, :Overall_Risk_Description,
+                    :Proposed_Risk_Action, :Risk_Comment,
+                    :Evaluation_by, :Update_time, :Updated_by
+                )
+            """, sor_row)
+            conn.execute("""
+                INSERT OR REPLACE INTO Sales_Order_Case (
+                    Case_ID, Sales_Order_Business_Key, Status,
+                    VAT_Problem_Type, Recommended_Product_Value,
+                    Recommended_VAT_Product_Category, Recommended_VAT_Rate,
+                    Recommended_VAT_Fee, AI_Analysis, AI_Confidence,
+                    VAT_Gap_Fee, Evaluation_by,
+                    Proposed_Action_Tax, Proposed_Action_Customs,
+                    Communication, Additional_Evidence,
+                    Update_time, Updated_by
+                ) VALUES (
+                    :Case_ID, :Sales_Order_Business_Key, :Status,
+                    :VAT_Problem_Type, :Recommended_Product_Value,
+                    :Recommended_VAT_Product_Category, :Recommended_VAT_Rate,
+                    :Recommended_VAT_Fee, :AI_Analysis, :AI_Confidence,
+                    :VAT_Gap_Fee, :Evaluation_by,
+                    :Proposed_Action_Tax, :Proposed_Action_Customs,
+                    :Communication, :Additional_Evidence,
+                    :Update_time, :Updated_by
+                )
+            """, soc_row)
+    finally:
+        conn.close()
+
+
+_HYDRATED_CASE_SQL = """
+    SELECT
+        c.*,
+        o.Sales_Order_ID,
+        o.HS_Product_Category, o.Product_Description, o.Product_Value,
+        o.VAT_Rate, o.VAT_Fee, o.Seller_Name,
+        o.Country_Origin, o.Country_Destination,
+        r.Sales_Order_Risk_ID,
+        r.Risk_Type,
+        r.Overall_Risk_Score, r.Overall_Risk_Level,
+        r.Seller_Risk_Score, r.Country_Risk_Score,
+        r.Product_Category_Risk_Score, r.Manufacturer_Risk_Score,
+        r.Confidence_Score, r.Proposed_Risk_Action
+    FROM Sales_Order_Case c
+    LEFT JOIN Sales_Order      o ON c.Sales_Order_Business_Key = o.Sales_Order_Business_Key
+    LEFT JOIN Sales_Order_Risk r ON c.Sales_Order_Business_Key = r.Sales_Order_Business_Key
+"""
+
+
+def _hydrate_row(r) -> dict:
+    import json as _json
+    d = dict(r)
+    try:
+        d["Communication"] = _json.loads(d["Communication"]) if d.get("Communication") else []
+    except Exception:
+        d["Communication"] = []
+    return d
+
+
+def get_all_cases_hydrated(status: str | None = None, limit: int = 200) -> list[dict]:
+    """Return cases joined with Sales_Order + Sales_Order_Risk."""
+    conn = _connect(INVESTIGATION_DB)
+    if status:
+        sql = _HYDRATED_CASE_SQL + " WHERE c.Status = ? ORDER BY c.Update_time DESC LIMIT ?"
+        rows = conn.execute(sql, (status, limit)).fetchall()
+    else:
+        sql = _HYDRATED_CASE_SQL + " ORDER BY c.Update_time DESC LIMIT ?"
+        rows = conn.execute(sql, (limit,)).fetchall()
+    conn.close()
+    return [_hydrate_row(r) for r in rows]
+
+
+def get_case_hydrated(case_id: str) -> dict | None:
+    """Single case joined with Sales_Order + Sales_Order_Risk."""
+    conn = _connect(INVESTIGATION_DB)
+    sql = _HYDRATED_CASE_SQL + " WHERE c.Case_ID = ? LIMIT 1"
+    row = conn.execute(sql, (case_id,)).fetchone()
+    conn.close()
+    return _hydrate_row(row) if row else None
 
 
 # ── Data hub upserts (3 dark-purple tables) ──────────────────────────────────

@@ -663,13 +663,17 @@ async def _ct_risk_management_factory() -> None:
     """
     Custom & Tax Risk Management System.
 
-    Subscribes to ASSESSMENT_OUTCOME (retain + investigate routes).
-    For each retain/investigate event:
-      1. Creates a Sales_Order_Case row in investigation.db
-      2. Pushes an SSE notification to Revenue Guardian clients
-      3. Produces an INVESTIGATION_OUTCOME event for the DB Store Factory
+    Subscribes to ASSESSMENT_OUTCOME (retain + investigate routes only).
+    For each such event, atomically writes the 3-row case dataset
+    (Sales_Order + Sales_Order_Risk + Sales_Order_Case) into
+    investigation.db and pushes the hydrated case to Revenue Guardian
+    SSE subscribers.
+
+    Does NOT publish INVESTIGATION_OUTCOME at creation. That event is the
+    factory's exit signal and fires only when an officer closes the case
+    (see customs-action retainment/release and final-decision endpoints).
     """
-    from lib.database import upsert_sales_order_case
+    from lib.database import upsert_investigation_set, get_case_hydrated
     import uuid as _uuid
 
     q = broker.subscribe(ASSESSMENT_OUTCOME)
@@ -684,16 +688,50 @@ async def _ct_risk_management_factory() -> None:
         case_id = f"CASE-{_uuid.uuid4().hex[:12].upper()}"
 
         # Derive VAT problem type from risk engine flags
-        engines = msg.get("engines", {})
-        problem_type = "Risk Pattern"
-        if engines.get("vat_ratio"):
+        engines = msg.get("engines", {}) or {}
+        if engines.get("vat_ratio") and engines.get("watchlist"):
+            problem_type = "VAT Rate Deviation + Watchlist Match"
+        elif engines.get("vat_ratio"):
             problem_type = "VAT Rate Deviation"
-        if engines.get("watchlist"):
-            problem_type = "Watchlist Match" if not engines.get("vat_ratio") else "VAT Rate Deviation + Watchlist Match"
+        elif engines.get("watchlist"):
+            problem_type = "Watchlist Match"
+        else:
+            problem_type = "Risk Pattern"
 
-        # Build a fully populated case row from the ASSESSMENT_OUTCOME
-        # (which carries all Sales_Order + risk fields)
-        case_row = {
+        so_row = {
+            "Sales_Order_ID":           msg.get("Sales_Order_ID"),
+            "Sales_Order_Business_Key": bk,
+            "HS_Product_Category":      msg.get("HS_Product_Category"),
+            "Product_Description":      msg.get("Product_Description"),
+            "Product_Value":            msg.get("Product_Value"),
+            "VAT_Rate":                 msg.get("VAT_Rate"),
+            "VAT_Fee":                  msg.get("VAT_Fee"),
+            "Seller_Name":              msg.get("Seller_Name"),
+            "Country_Origin":           msg.get("Country_Origin"),
+            "Country_Destination":      msg.get("Country_Destination"),
+            "Status":                   route,
+            "Update_time":              now_iso,
+            "Updated_by":               "system",
+        }
+        sor_row = {
+            "Sales_Order_Risk_ID":         msg.get("Sales_Order_Risk_ID"),
+            "Sales_Order_Business_Key":    bk,
+            "Risk_Type":                   msg.get("Risk_Type", "VAT"),
+            "Overall_Risk_Score":          msg.get("Overall_Risk_Score"),
+            "Overall_Risk_Level":          msg.get("Overall_Risk_Level"),
+            "Seller_Risk_Score":           msg.get("Seller_Risk_Score"),
+            "Country_Risk_Score":          msg.get("Country_Risk_Score"),
+            "Product_Category_Risk_Score": msg.get("Product_Category_Risk_Score"),
+            "Manufacturer_Risk_Score":     msg.get("Manufacturer_Risk_Score"),
+            "Confidence_Score":            msg.get("Confidence_Score"),
+            "Overall_Risk_Description":    msg.get("Overall_Risk_Description"),
+            "Proposed_Risk_Action":        msg.get("Proposed_Risk_Action"),
+            "Risk_Comment":                msg.get("Risk_Comment"),
+            "Evaluation_by":               msg.get("Evaluation_by"),
+            "Update_time":                 now_iso,
+            "Updated_by":                  "system",
+        }
+        soc_row = {
             "Case_ID":                          case_id,
             "Sales_Order_Business_Key":         bk,
             "Status":                           "New",
@@ -713,22 +751,12 @@ async def _ct_risk_management_factory() -> None:
             "Update_time":                      now_iso,
             "Updated_by":                       "system",
         }
-        upsert_sales_order_case(case_row)
 
-        # Notify Revenue Guardian SSE subscribers
-        _push_rg_case_sse({
-            "event": "new_case",
-            "case_id": case_id,
-            "business_key": bk,
-        })
+        upsert_investigation_set(so_row, sor_row, soc_row)
 
-        # Produce investigation outcome for the DB Store Factory
-        await broker.publish(INVESTIGATION_OUTCOME, {
-            **msg,
-            "investigation": "auto",
-            "outcome":       route,
-            "Case_ID":       case_id,
-        })
+        # Push hydrated case so frontends render without a follow-up fetch
+        hydrated = get_case_hydrated(case_id) or {"Case_ID": case_id}
+        _push_rg_case_sse({"event": "new_case", "case": hydrated})
 
 
 # ── (Revenue Guardian two-entity workflow removed — replaced by
@@ -1159,9 +1187,10 @@ def api_ireland_case(transaction_id: str):
 
 @app.get("/api/rg/cases")
 def api_rg_cases(status: str | None = Query(None), limit: int = Query(200, ge=1, le=1000)):
-    """List all cases for Revenue Guardian. Optionally filter by Status."""
-    from lib.database import get_all_cases
-    return {"items": get_all_cases(status=status, limit=limit)}
+    """List all cases for Revenue Guardian, hydrated with Sales_Order +
+    Sales_Order_Risk fields. Optionally filter by Status."""
+    from lib.database import get_all_cases_hydrated
+    return {"items": get_all_cases_hydrated(status=status, limit=limit)}
 
 
 @app.get("/api/rg/cases/stream")
@@ -1187,12 +1216,42 @@ async def api_rg_cases_stream(request: Request):
 
 @app.get("/api/rg/cases/{case_id}")
 def api_rg_case_detail(case_id: str):
-    """Single case detail."""
-    from lib.database import get_case_by_id
-    case = get_case_by_id(case_id)
+    """Single case detail (hydrated with Sales_Order + Sales_Order_Risk)."""
+    from lib.database import get_case_hydrated
+    case = get_case_hydrated(case_id)
     if not case:
         return JSONResponse(status_code=404, content={"detail": "Case not found"})
     return case
+
+
+def _publish_investigation_outcome(case_id: str, outcome: str) -> None:
+    """Emit the C&T factory's exit event when a case is closed."""
+    from lib.database import get_case_hydrated
+    case = get_case_hydrated(case_id)
+    if not case:
+        return
+    asyncio.create_task(broker.publish(INVESTIGATION_OUTCOME, {
+        "Case_ID":                  case_id,
+        "Sales_Order_Business_Key": case.get("Sales_Order_Business_Key"),
+        "Sales_Order_ID":           case.get("Sales_Order_ID"),
+        "outcome":                  outcome,   # released | retained | refused
+        "Proposed_Action_Customs":  case.get("Proposed_Action_Customs"),
+        "Proposed_Action_Tax":      case.get("Proposed_Action_Tax"),
+        "VAT_Gap_Fee":              case.get("VAT_Gap_Fee"),
+        "Recommended_Product_Value":        case.get("Recommended_Product_Value"),
+        "Recommended_VAT_Product_Category": case.get("Recommended_VAT_Product_Category"),
+        "Recommended_VAT_Rate":             case.get("Recommended_VAT_Rate"),
+        "Recommended_VAT_Fee":              case.get("Recommended_VAT_Fee"),
+        "closed_by":                case.get("Updated_by"),
+        "closed_at":                case.get("Update_time"),
+    }))
+
+
+def _emit_case_updated_sse(case_id: str, action: str) -> None:
+    """Push the hydrated case to RG SSE subscribers."""
+    from lib.database import get_case_hydrated
+    case = get_case_hydrated(case_id)
+    _push_rg_case_sse({"event": "case_updated", "action": action, "case": case})
 
 
 @app.post("/api/rg/cases/{case_id}/customs-action")
@@ -1242,7 +1301,11 @@ def api_rg_customs_action(case_id: str, body: dict):
 
     update_case(case_id, updates)
 
-    _push_rg_case_sse({"event": "case_updated", "case_id": case_id, "action": action})
+    _emit_case_updated_sse(case_id, action)
+    if action in ("retainment", "release"):
+        _publish_investigation_outcome(
+            case_id, "retained" if action == "retainment" else "released"
+        )
     return {"ok": True}
 
 
@@ -1293,7 +1356,7 @@ def api_rg_tax_action(case_id: str, body: dict):
 
     update_case(case_id, updates)
 
-    _push_rg_case_sse({"event": "case_updated", "case_id": case_id, "action": action})
+    _emit_case_updated_sse(case_id, action)
     return {"ok": True}
 
 
@@ -1331,7 +1394,8 @@ def api_rg_final_decision(case_id: str, body: dict):
 
     update_case(case_id, updates)
 
-    _push_rg_case_sse({"event": "case_updated", "case_id": case_id, "action": f"final_{decision}"})
+    _emit_case_updated_sse(case_id, f"final_{decision}")
+    _publish_investigation_outcome(case_id, decision)
     return {"ok": True}
 
 
@@ -1360,7 +1424,7 @@ def api_rg_add_communication(case_id: str, body: dict):
 
     update_case(case_id, {"Communication": comm, "Update_time": now_iso})
 
-    _push_rg_case_sse({"event": "case_updated", "case_id": case_id, "action": "communication"})
+    _emit_case_updated_sse(case_id, "communication")
     return {"ok": True}
 
 
