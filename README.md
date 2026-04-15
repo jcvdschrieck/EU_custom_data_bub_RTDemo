@@ -199,21 +199,32 @@ Then open [http://localhost:8000](http://localhost:8000). You will land on the *
 
 > The frontend is served directly by FastAPI — no separate `npm run dev` needed in production. For frontend hot-reload during development, run `npm run dev` in `frontend/` and point your browser to `http://localhost:5175`.
 
-### Running alongside Revenue Guardian
+### Running alongside Revenue Guardian (integrated mode)
 
-The companion `revenue-guardian` UI consumes this backend's `/api/customs/*` and `/api/tax/*` endpoints to drive the human-in-the-loop review flow:
+The companion `revenue-guardian` UI consumes this backend's `/api/rg/cases/*` REST + SSE endpoints. The C&T Risk Management Factory writes a 3-row dataset (`Sales_Order` + `Sales_Order_Risk` + `Sales_Order_Case`) into `investigation.db`; the frontend reads cases from there via `GET /api/rg/cases` and subscribes to `/api/rg/cases/stream` for live updates. Officer actions (release / retain / submit-for-tax-review / final-decision / communication) POST back to the corresponding endpoints; case closure publishes a terminal `INVESTIGATION_OUTCOME` event to the broker.
+
+**Branches used in the integration:**
+- `EU_custom_data_hub_RTDemo` → branch **`backend-v2`**
+- `revenue-guardian` → branch **`integrationV2`**
 
 ```bash
-# Terminal 1 — this repo
+# Terminal 1 — backend
+cd EU_custom_data_hub_RTDemo
+git checkout backend-v2
 python -m uvicorn api:app --host 0.0.0.0 --port 8000
 
-# Terminal 2 — sibling repo
+# Terminal 2 — frontend (sibling repo)
 cd ../revenue-guardian
+git checkout integrationV2
 npm install   # first time only
 npm run dev   # serves on http://localhost:8080
 ```
 
-Open the EU Custom Data Hub at `:8000` (start the simulation), then the Revenue Guardian dashboard at `:8080`. RED-routed transactions land in the **Customs Authority** page; AMBER-routed ones land in the **Tax Authority** page.
+Open the EU Custom Data Hub at `:8000` (click **▶ Start** on the simulation page), then the Revenue Guardian portal at `:8080`. Cases routed to **retain** or **investigate** by the Release Factory automatically appear on the **Customs Authority** page within seconds via SSE. Cases the Customs Officer forwards via *Submit for Tax Review* show up on the **Tax Authority** page.
+
+CORS on the backend is open (`allow_origins=["*"]`) so the frontend at `:8080` can call the backend at `:8000` directly — no proxy needed.
+
+A simulation reset on `:8000` emits a `cases_reset` SSE event that the frontend listens for; it clears its in-memory case map and wipes its officer-state localStorage cache so both sides stay in sync.
 
 ---
 
