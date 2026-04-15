@@ -220,11 +220,8 @@ def main():
         ("If not → clear", 1),
     ], font_size=10)
 
-    _add_table(s3, 0.5, 3.5, 5.5, [
-        ["Parameter", "Value", "Role"],
-        ["WATCHLIST", "frozenset of (seller_id, seller_country) tuples", "Static lookup table of monitored pairs"],
-        ["Lookup type", "Binary (match / no match)", "No statistical analysis — instant O(1) check"],
-    ], col_widths=[1.5, 2.5, 1.5])
+    # No parameters table — the watchlist has no tuneable parameters.
+    # The list itself IS the configuration (shown in the Seeded Scenario).
 
     # Seeded Scenario (right side)
     txBox = s3.shapes.add_textbox(Inches(6.3), Inches(1.1), Inches(3.3), Inches(3.5))
