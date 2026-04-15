@@ -122,7 +122,7 @@ from pydantic import BaseModel
 from lib.broker import (
     broker,
     SALES_ORDER_EVENT, RT_RISK_OUTCOME, ORDER_VALIDATION,
-    ASSESSMENT_OUTCOME, INVESTIGATION_OUTCOME,
+    ASSESSMENT_OUTCOME, INVESTIGATION_OUTCOME, CUSTOM_OUTCOME,
     RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME, RT_SCORE,  # legacy counters
     RELEASE_EVENT, RETAIN_EVENT, INVESTIGATE_EVENT,   # legacy counters
 )
@@ -772,129 +772,46 @@ _REMOVED_FLAT_TX_VIEW = True  # marker — old _flat_tx_view and related
 
 async def _db_store_worker() -> None:
     """
-    DB Store Factory — persists transactions to the data hub.
+    DB Store Factory — emits a single terminal CUSTOM_OUTCOME event per
+    completed order. Persistence to the legacy data hub is deactivated.
 
     Subscribes to:
-      ASSESSMENT_OUTCOME    — release: store immediately
-                             — retain/investigate: buffer, await investigation
-      INVESTIGATION_OUTCOME — triggers storage of buffered retain/investigate
-      SALES_ORDER_EVENT     — raw sales orders for legacy transactions table
+      ASSESSMENT_OUTCOME    — release route → emit CUSTOM_OUTCOME automated_release
+      INVESTIGATION_OUTCOME — outcome released/retained → emit CUSTOM_OUTCOME
+                              custom_release / custom_retain
 
-    Stores to:
-      Sales_Order           — order details + status (new data model)
-      Sales_Order_Risk      — risk assessment data (new data model)
-      transactions          — legacy flat table
+    Each emitted event carries: order_id, timestamp, status.
     """
-    from lib.database import upsert_sales_order, upsert_sales_order_risk
-
-    # Buffer for retain/investigate assessments awaiting investigation outcome
-    _pending: dict[str, dict] = {}  # Sales_Order_Business_Key -> assessment msg
-
-    async def _push_sse(row: dict) -> None:
-        if not _sse_queues:
-            return
-        payload = _json.dumps(row)
-        dead = set()
-        for sse_q in _sse_queues:
-            try:
-                sse_q.put_nowait(payload)
-            except asyncio.QueueFull:
-                dead.add(sse_q)
-        _sse_queues.difference_update(dead)
-
-    def _store_to_data_model(msg: dict, status: str) -> None:
-        """Persist to the new data model tables."""
-        now_iso = datetime.now(timezone.utc).isoformat()
-        bk = msg.get("Sales_Order_Business_Key", "")
-
-        upsert_sales_order({
-            "Sales_Order_ID":           msg.get("Sales_Order_ID", ""),
-            "Sales_Order_Business_Key": bk,
-            "HS_Product_Category":      msg.get("HS_Product_Category"),
-            "Product_Description":      msg.get("Product_Description"),
-            "Product_Value":            msg.get("Product_Value"),
-            "VAT_Rate":                 msg.get("VAT_Rate"),
-            "VAT_Fee":                  msg.get("VAT_Fee"),
-            "Seller_Name":              msg.get("Seller_Name"),
-            "Country_Origin":           msg.get("Country_Origin"),
-            "Country_Destination":      msg.get("Country_Destination"),
-            "Status":                   status,
-            "Update_time":              now_iso,
-            "Updated_by":               None,
+    async def _emit(order_id: str, status: str) -> None:
+        await broker.publish(CUSTOM_OUTCOME, {
+            "order_id":  order_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "status":    status,
         })
-
-        upsert_sales_order_risk({
-            "Sales_Order_Risk_ID":         msg.get("Sales_Order_Risk_ID", ""),
-            "Sales_Order_Business_Key":    bk,
-            "Risk_Type":                   msg.get("Risk_Type", "VAT"),
-            "Overall_Risk_Score":          msg.get("Overall_Risk_Score"),
-            "Overall_Risk_Level":          msg.get("Overall_Risk_Level"),
-            "Seller_Risk_Score":           msg.get("Seller_Risk_Score"),
-            "Country_Risk_Score":          msg.get("Country_Risk_Score"),
-            "Product_Category_Risk_Score": msg.get("Product_Category_Risk_Score"),
-            "Manufacturer_Risk_Score":     msg.get("Manufacturer_Risk_Score"),
-            "Confidence_Score":            msg.get("Confidence_Score"),
-            "Overall_Risk_Description":    msg.get("Overall_Risk_Description"),
-            "Proposed_Risk_Action":        msg.get("Proposed_Risk_Action"),
-            "Risk_Comment":                msg.get("Risk_Comment"),
-            "Evaluation_by":               msg.get("Evaluation_by"),
-            "Update_time":                 now_iso,
-            "Updated_by":                  None,
-        })
-
-    async def _store_legacy(msg: dict, suspicious: bool) -> None:
-        """Legacy flat table + SSE push."""
-        tx = msg.get("tx", {})
-        if not tx.get("transaction_id"):
-            return
-        insert_transaction(tx)
-        risk_score = msg.get("risk_route", msg.get("risk_score", "green"))
-        alarm_id = msg.get("alarm_id")
-        if suspicious:
-            flag_transaction_suspicious(tx["transaction_id"], alarm_id, risk_score)
-        row = dict(tx)
-        row["suspicious"] = 1 if suspicious else 0
-        row["risk_score"] = risk_score
-        _live_queue.appendleft(row)
-        await _push_sse(row)
 
     async def _drain_assessment() -> None:
-        """Release -> store immediately. Retain/investigate -> buffer."""
         q = broker.subscribe(ASSESSMENT_OUTCOME)
         while True:
             msg = await q.get()
-            route = msg.get("route")
-            bk = msg.get("Sales_Order_Business_Key", "")
-            if route == "release":
-                _store_to_data_model(msg, "release")
-                await _store_legacy(msg, suspicious=False)
-            elif route in ("retain", "investigate"):
-                _pending[bk] = msg
+            if msg.get("route") == "release":
+                order_id = msg.get("Sales_Order_ID") or msg.get("Sales_Order_Business_Key", "")
+                await _emit(order_id, "automated_release")
 
     async def _drain_investigation() -> None:
-        """Investigation outcome -> find buffered assessment and store."""
         q = broker.subscribe(INVESTIGATION_OUTCOME)
         while True:
             msg = await q.get()
-            bk = msg.get("Sales_Order_Business_Key", "")
-            route = msg.get("route", msg.get("outcome", ""))
-            assessment = _pending.pop(bk, msg)
-            _store_to_data_model(assessment, route)
-            await _store_legacy(assessment, suspicious=True)
+            outcome = msg.get("outcome") or msg.get("route") or ""
+            if outcome == "released":
+                status = "custom_release"
+            elif outcome == "retained":
+                status = "custom_retain"
+            else:
+                continue   # ignore refused / other terminal states for now
+            order_id = msg.get("Sales_Order_ID") or msg.get("Sales_Order_Business_Key", "")
+            await _emit(order_id, status)
 
-    async def _drain_sales_order() -> None:
-        """Raw sales orders for legacy transactions table."""
-        q = broker.subscribe(SALES_ORDER_EVENT)
-        while True:
-            msg = await q.get()
-            tx = msg if isinstance(msg, dict) and "transaction_id" in msg else msg
-            insert_transaction(tx)
-
-    await asyncio.gather(
-        _drain_assessment(),
-        _drain_investigation(),
-        _drain_sales_order(),
-    )
+    await asyncio.gather(_drain_assessment(), _drain_investigation())
 
 
 
@@ -1448,6 +1365,7 @@ def sim_pipeline():
     topics = [
         SALES_ORDER_EVENT, RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME,
         RT_SCORE, ORDER_VALIDATION, ASSESSMENT_OUTCOME, INVESTIGATION_OUTCOME,
+        CUSTOM_OUTCOME,
         RELEASE_EVENT, RETAIN_EVENT, INVESTIGATE_EVENT,
     ]
     return {
@@ -1460,6 +1378,11 @@ def sim_pipeline():
             "rt_score_green":    count_field_value(RT_SCORE, "outcome.risk_score", "green"),
             "rt_score_amber":    count_field_value(RT_SCORE, "outcome.risk_score", "amber"),
             "rt_score_red":      count_field_value(RT_SCORE, "outcome.risk_score", "red"),
+        },
+        "custom_outcome_status": {
+            "automated_release": count_field_value(CUSTOM_OUTCOME, "outcome.status", "automated_release"),
+            "custom_release":    count_field_value(CUSTOM_OUTCOME, "outcome.status", "custom_release"),
+            "custom_retain":     count_field_value(CUSTOM_OUTCOME, "outcome.status", "custom_retain"),
         },
     }
 

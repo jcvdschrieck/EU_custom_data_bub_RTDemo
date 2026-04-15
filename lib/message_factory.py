@@ -55,6 +55,7 @@ _TOPIC_INVESTIGATE    = "investigate_event"
 _TOPIC_AGENT_RETAIN   = "agent_retain_event"
 _TOPIC_AGENT_RELEASE  = "agent_release_event"
 _TOPIC_RELEASE_AFTER  = "release_after_investigation_event"
+_TOPIC_CUSTOM_OUTCOME = "custom_outcome"
 
 # Flat fields that are internal-only and should be stripped from file payloads
 _INTERNAL_FLAT_FIELDS = frozenset({
@@ -281,6 +282,7 @@ def build_file_payload(topic: str, message: dict) -> dict:
     # Lightweight outcome message for all other topics
     order_id = (
         message.get("orderIdentifier")
+        or message.get("order_id")
         or (message.get("tx") or {}).get("orderIdentifier")
         or (message.get("tx") or {}).get("transaction_id")
         or message.get("sales_order_id")
@@ -326,6 +328,8 @@ def build_file_payload(topic: str, message: dict) -> dict:
         outcome = {"verdict": message.get("verdict")}
     elif topic == _TOPIC_RELEASE_AFTER:
         outcome = {"verdict": message.get("verdict"), "risk_score": "cleared"}
+    elif topic == _TOPIC_CUSTOM_OUTCOME:
+        outcome = {"status": message.get("status")}
     else:
         outcome = {}
 

@@ -1069,6 +1069,8 @@ function PipelineDiagram({ pipeline }) {
   const tax        = pipeline?.tax_queue              ?? null
   const taxRunning = pipeline?.tax_queue_agent_running ?? null
   const stored     = pipeline?.stored_count           ?? null
+  const customStatus = pipeline?.custom_outcome_status ?? { automated_release: 0, custom_release: 0, custom_retain: 0 }
+  const customTotal  = (customStatus.automated_release || 0) + (customStatus.custom_release || 0) + (customStatus.custom_retain || 0)
 
   // Row 1: two processing zones + Investigation event broker below
   const OV_H = 94, RT_H = 230, INV_H = 94, LGAP = 10
@@ -1289,8 +1291,31 @@ function PipelineDiagram({ pipeline }) {
                   tooltip="INVESTIGATION_OUTCOME — produced by the C&T Risk Management system for retain and investigate routes. Consumed by the DB Store Factory." /></div>
               </div>
               <div ref={dbHubRef} style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
-                <DBSinkNode count={stored} newCount={newStored}
-                  tooltip={`Custom Data Hub — ${stored ?? '?'} total records. ${newStored ?? 0} new since last reset.`} />
+                <div style={{
+                  border: '2px solid #0d6efd', borderRadius: 8, padding: '10px 12px',
+                  background: '#f0f6ff', minWidth: 200,
+                }} title={`Custom Outcome — ${customTotal} terminal events. Status breakdown shown below.`}>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: '#0d6efd', marginBottom: 4 }}>
+                    📤 Custom Outcome
+                  </div>
+                  <div style={{ fontSize: 10, color: '#495057', marginBottom: 6 }}>
+                    {fmt(customTotal)} total
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 10 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                      <span style={{ color: '#198754' }}>● automated_release</span>
+                      <span style={{ fontWeight: 600 }}>{fmt(customStatus.automated_release || 0)}</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                      <span style={{ color: '#0d6efd' }}>● custom_release</span>
+                      <span style={{ fontWeight: 600 }}>{fmt(customStatus.custom_release || 0)}</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                      <span style={{ color: '#dc3545' }}>● custom_retain</span>
+                      <span style={{ fontWeight: 600 }}>{fmt(customStatus.custom_retain || 0)}</span>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
 

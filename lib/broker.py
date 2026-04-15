@@ -116,6 +116,12 @@ ORDER_VALIDATION     = "order_validation"     # validation factory → assessmen
 ASSESSMENT_OUTCOME   = "assessment_outcome"   # assessment factory → DB store + C&T risk mgmt
 # Investigation outcome: produced by the Custom & Tax Risk Management system.
 INVESTIGATION_OUTCOME = "investigation_outcome"  # C&T risk mgmt → DB store
+# Final terminal outcome — produced by the DB Store factory. One event per
+# completed order, with a status field in:
+#   "automated_release"  (ASSESSMENT_OUTCOME route=release)
+#   "custom_release"     (INVESTIGATION_OUTCOME outcome=released)
+#   "custom_retain"      (INVESTIGATION_OUTCOME outcome=retained)
+CUSTOM_OUTCOME       = "custom_outcome"
 # Legacy aliases — kept so event_store counters and pipeline stats still work.
 RELEASE_OUTCOME      = "assessment_outcome"   # alias
 RT_RISK_1_OUTCOME    = "rt_risk_1_outcome"
