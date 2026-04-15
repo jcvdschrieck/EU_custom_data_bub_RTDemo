@@ -1099,6 +1099,28 @@ function PipelineDiagram({ pipeline }) {
               With center alignment the LEFT side would shift downward by
               (Heff - ROW1_H) / 2 and break alignment with MiddleSection's absolute
               children. */}
+          {/* Sales Order Event → C&T Risk Management: dashed L-shaped arrow.
+              Horizontal runway above the pipeline with a label. The fan-out's
+              dashed top branch connects to the left end; a downward tick on the
+              right end visually points into C&T Risk Management below. */}
+          <div style={{ height: 20, display: 'flex', alignItems: 'center',
+                        borderBottom: '1.5px dashed #6366f1', marginLeft: 70,
+                        marginRight: 200, marginBottom: 0, position: 'relative' }}>
+            <span style={{ fontSize: 8, color: '#6366f1', fontWeight: 700,
+                           position: 'absolute', top: 0, left: '35%',
+                           background: '#fff', padding: '0 6px' }}>
+              Sales Order Event → C&T Risk Management
+            </span>
+            {/* Downward arrow at the right end */}
+            <svg width="10" height="10" style={{ position: 'absolute', right: -5, bottom: -10 }}>
+              <polygon points="0,0 10,0 5,8" fill="#6366f1" />
+            </svg>
+            {/* Upward connection from fan-out at the left end */}
+            <svg width="2" height="10" style={{ position: 'absolute', left: 0, top: -10 }}>
+              <line x1="1" y1="0" x2="1" y2="10" stroke="#6366f1" strokeWidth="1.5" strokeDasharray="4 2" />
+            </svg>
+          </div>
+
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: 0, position: 'relative' }}>
 
             {/* Entry Broker — centered at the midpoint between the two fan-out
@@ -1111,8 +1133,14 @@ function PipelineDiagram({ pipeline }) {
               </Zone>
             </div>
 
-            {/* FanOut: Entry → Sales Order Validation + Real-Time Risk Assessment */}
-            <FanOutSVG height={ROW1_H} targetYs={[yOV, yRT]} width={48} />
+            {/* FanOut: Entry → Sales Order Validation + Real-Time Risk Assessment
+                + a third branch going UP that will route across the top to C&T Risk Management.
+                The third target is at y=0 (top of the container), drawn as a dashed line. */}
+            <FanOutMixedSVG height={ROW1_H} width={48} targets={[
+              { y: 0,   dashed: true  },
+              { y: yOV, dashed: false },
+              { y: yRT, dashed: false },
+            ]} />
 
             {/* Three parallel zones stacked — all at ZONE_W so Row 1 is visually aligned */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
@@ -1264,30 +1292,6 @@ function PipelineDiagram({ pipeline }) {
               )
             })()}
 
-          </div>
-
-          {/* Sales Order Event subscription arrows — dashed horizontal lines
-              running below the main flow from the Entry broker area to the
-              C&T Risk Management and DB Store Factory boxes. */}
-          <div style={{ marginTop: 8, padding: '4px 0', borderTop: '1px dashed #e0e0e0' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: 4 }}>
-              <svg width="16" height="12">
-                <line x1="0" y1="6" x2="12" y2="6" stroke="#adb5bd" strokeWidth="1.5" strokeDasharray="4 2" />
-                <polygon points="10,2 16,6 10,10" fill="#adb5bd" />
-              </svg>
-              <span style={{ fontSize: 9, color: '#868e96', fontWeight: 600 }}>
-                Sales Order Event also subscribes to: C&T Risk Management + DB Store Factory
-              </span>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: 4, marginTop: 2 }}>
-              <svg width="16" height="12">
-                <line x1="0" y1="6" x2="12" y2="6" stroke="#adb5bd" strokeWidth="1.5" strokeDasharray="4 2" />
-                <polygon points="10,2 16,6 10,10" fill="#adb5bd" />
-              </svg>
-              <span style={{ fontSize: 9, color: '#868e96', fontWeight: 600 }}>
-                Investigation Outcome also feeds into DB Store Factory (vertical arrow on far right)
-              </span>
-            </div>
           </div>
 
         </div>
