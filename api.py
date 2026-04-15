@@ -930,6 +930,7 @@ def _compute_sim_state_snapshot() -> dict:
     topics = [
         SALES_ORDER_EVENT, RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME,
         RT_SCORE, ORDER_VALIDATION, ASSESSMENT_OUTCOME, INVESTIGATION_OUTCOME,
+        CUSTOM_OUTCOME,
         RELEASE_EVENT, RETAIN_EVENT, INVESTIGATE_EVENT,
     ]
     pipeline = {
@@ -942,6 +943,11 @@ def _compute_sim_state_snapshot() -> dict:
             "rt_score_green":    count_field_value(RT_SCORE, "outcome.risk_score", "green"),
             "rt_score_amber":    count_field_value(RT_SCORE, "outcome.risk_score", "amber"),
             "rt_score_red":      count_field_value(RT_SCORE, "outcome.risk_score", "red"),
+        },
+        "custom_outcome_status": {
+            "automated_release": count_field_value(CUSTOM_OUTCOME, "outcome.status", "automated_release"),
+            "custom_release":    count_field_value(CUSTOM_OUTCOME, "outcome.status", "custom_release"),
+            "custom_retain":     count_field_value(CUSTOM_OUTCOME, "outcome.status", "custom_retain"),
         },
     }
 
