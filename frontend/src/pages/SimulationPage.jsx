@@ -182,6 +182,27 @@ function BrokerNode({ label, topicKey, count, children, accent, sm, tooltip, wid
   )
 }
 
+// Per-status breakdown rendered as BrokerNode children for the
+// CUSTOM_OUTCOME tile. Three small rows with a coloured dot.
+function CustomOutcomeBreakdown({ s }) {
+  const Row = ({ color, label, n }) => (
+    <div style={{
+      display: 'flex', justifyContent: 'space-between', gap: 6,
+      fontSize: 8, lineHeight: 1.3,
+    }}>
+      <span style={{ color }}>● {label}</span>
+      <span style={{ fontWeight: 700, color: 'var(--text-primary)' }}>{fmt(n || 0)}</span>
+    </div>
+  )
+  return (
+    <div style={{ marginTop: 4, paddingTop: 4, borderTop: '1px dashed var(--border-light)', display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <Row color="#198754" label="automated_release" n={s.automated_release} />
+      <Row color="#0d6efd" label="custom_release"    n={s.custom_release} />
+      <Row color="#dc3545" label="custom_retain"     n={s.custom_retain} />
+    </div>
+  )
+}
+
 function FactoryNode({ label, description, icon, accent, sm, tooltip, width, count, countLabel }) {
   const defaultMinW = sm ? 86 : 120
   // accent is the inner-content + border color; falls back to the neutral
@@ -789,27 +810,11 @@ function MiddleSection({ ev, rf, customs, tax, taxRunning, stored, newStored, H,
           <FactoryNode icon="💾" label="DB Store Factory" description="emits CUSTOM_OUTCOME" sm
             tooltip="DB Store Factory — subscribes to Assessment Outcome (release route) and Investigation Outcome. Emits one CUSTOM_OUTCOME event per completed order; persistence to the legacy hub is deactivated." />
           <Arrow down />
-          <div style={{
-            border: '2px solid #0d6efd', borderRadius: 8, padding: '10px 12px',
-            background: '#f0f6ff', minWidth: 200,
-          }} title={`Custom Outcome — ${customTotal} terminal events.`}>
-            <div style={{ fontSize: 11, fontWeight: 600, color: '#0d6efd', marginBottom: 4 }}>📤 Custom Outcome</div>
-            <div style={{ fontSize: 10, color: '#495057', marginBottom: 6 }}>{fmt(customTotal)} total</div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 10 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                <span style={{ color: '#198754' }}>● automated_release</span>
-                <span style={{ fontWeight: 600 }}>{fmt(customStatus.automated_release || 0)}</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                <span style={{ color: '#0d6efd' }}>● custom_release</span>
-                <span style={{ fontWeight: 600 }}>{fmt(customStatus.custom_release || 0)}</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                <span style={{ color: '#dc3545' }}>● custom_retain</span>
-                <span style={{ fontWeight: 600 }}>{fmt(customStatus.custom_retain || 0)}</span>
-              </div>
-            </div>
-          </div>
+          <BrokerNode label="Custom Outcome" topicKey="CUSTOM_OUTCOME" sm
+            count={customTotal}
+            tooltip={`Terminal CUSTOM_OUTCOME broker — ${customTotal} events. Status breakdown: automated_release ${customStatus.automated_release || 0}, custom_release ${customStatus.custom_release || 0}, custom_retain ${customStatus.custom_retain || 0}.`}>
+            <CustomOutcomeBreakdown s={customStatus} />
+          </BrokerNode>
         </div>
       </div>
 
@@ -1310,31 +1315,11 @@ function PipelineDiagram({ pipeline }) {
                   tooltip="INVESTIGATION_OUTCOME — produced by the C&T Risk Management system for retain and investigate routes. Consumed by the DB Store Factory." /></div>
               </div>
               <div ref={dbHubRef} style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
-                <div style={{
-                  border: '2px solid #0d6efd', borderRadius: 8, padding: '10px 12px',
-                  background: '#f0f6ff', minWidth: 200,
-                }} title={`Custom Outcome — ${customTotal} terminal events. Status breakdown shown below.`}>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: '#0d6efd', marginBottom: 4 }}>
-                    📤 Custom Outcome
-                  </div>
-                  <div style={{ fontSize: 10, color: '#495057', marginBottom: 6 }}>
-                    {fmt(customTotal)} total
-                  </div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 10 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                      <span style={{ color: '#198754' }}>● automated_release</span>
-                      <span style={{ fontWeight: 600 }}>{fmt(customStatus.automated_release || 0)}</span>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                      <span style={{ color: '#0d6efd' }}>● custom_release</span>
-                      <span style={{ fontWeight: 600 }}>{fmt(customStatus.custom_release || 0)}</span>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                      <span style={{ color: '#dc3545' }}>● custom_retain</span>
-                      <span style={{ fontWeight: 600 }}>{fmt(customStatus.custom_retain || 0)}</span>
-                    </div>
-                  </div>
-                </div>
+                <BrokerNode label="Custom Outcome" topicKey="CUSTOM_OUTCOME" sm width={OUT_BROKER_W}
+                  count={customTotal}
+                  tooltip={`Terminal CUSTOM_OUTCOME broker — ${customTotal} events. Status breakdown: automated_release ${customStatus.automated_release || 0}, custom_release ${customStatus.custom_release || 0}, custom_retain ${customStatus.custom_retain || 0}.`}>
+                  <CustomOutcomeBreakdown s={customStatus} />
+                </BrokerNode>
               </div>
             </div>
 
@@ -1407,7 +1392,7 @@ function PipelineDiagram({ pipeline }) {
         <LegendItem color="var(--eu-blue)" bg="var(--eu-blue-light)" label="Event Broker" />
         <LegendItem color="#868e96" bg="#f8f9fa" label="Factory" />
         <LegendItem color="#6366f1" bg="#6366f112" label="Application (C&T Risk Mgmt)" />
-        <LegendItem color="#0d6efd" bg="#f0f6ff" label="Custom Outcome (terminal broker)" />
+        <LegendItem color="var(--eu-blue)" bg="var(--eu-blue-light)" label="Custom Outcome (terminal broker)" />
         <LegendItem color="var(--text-muted)" bg="#ffffff" label="Processing zone" dashed />
 
         {/* Score badges */}
