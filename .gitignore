@@ -5,6 +5,9 @@ __pycache__/
 data/*.db
 data/*.db-shm
 data/*.db-wal
+# Pre-seeded open cases — small, deliberately versioned so demos work
+# out of the box. Rebuild with `python scripts/build_seed_cases.py`.
+!data/seed_cases.db
 frontend/node_modules/
 frontend/dist/
 data/events/
