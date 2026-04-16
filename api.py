@@ -750,6 +750,9 @@ async def _ct_risk_management_factory() -> None:
             "Additional_Evidence":              None,
             "Update_time":                      now_iso,
             "Updated_by":                       "system",
+            # Frozen at insert; never bumped by officer actions. Drives the
+            # FIFO ordering on the Customs / Tax queues.
+            "Created_time":                     now_iso,
         }
 
         upsert_investigation_set(so_row, sor_row, soc_row)

@@ -292,10 +292,12 @@ CREATE TABLE IF NOT EXISTS Sales_Order_Case (
     Communication                    TEXT,
     Additional_Evidence              TEXT,
     Update_time                      TEXT,
-    Updated_by                       TEXT
+    Updated_by                       TEXT,
+    Created_time                     TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_soc_bk     ON Sales_Order_Case(Sales_Order_Business_Key);
-CREATE INDEX IF NOT EXISTS idx_soc_status ON Sales_Order_Case(Status);
+CREATE INDEX IF NOT EXISTS idx_soc_bk      ON Sales_Order_Case(Sales_Order_Business_Key);
+CREATE INDEX IF NOT EXISTS idx_soc_status  ON Sales_Order_Case(Status);
+CREATE INDEX IF NOT EXISTS idx_soc_created ON Sales_Order_Case(Created_time);
 """
 
 
@@ -392,6 +394,15 @@ def init_investigation_db() -> None:
     _init_ddl(INVESTIGATION_DB, _SALES_ORDER_DDL)
     _init_ddl(INVESTIGATION_DB, _SALES_ORDER_RISK_DDL)
     _init_ddl(INVESTIGATION_DB, _SALES_ORDER_CASE_DDL)
+    # Migrate older DBs: add Created_time column + back-fill from Update_time
+    conn = _connect(INVESTIGATION_DB)
+    with conn:
+        try:
+            conn.execute("ALTER TABLE Sales_Order_Case ADD COLUMN Created_time TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        conn.execute("UPDATE Sales_Order_Case SET Created_time = Update_time WHERE Created_time IS NULL")
+    conn.close()
 
 
 def _init_ddl(db_path, ddl: str) -> None:
@@ -1209,7 +1220,7 @@ def upsert_investigation_set(so_row: dict, sor_row: dict, soc_row: dict) -> None
                     VAT_Gap_Fee, Evaluation_by,
                     Proposed_Action_Tax, Proposed_Action_Customs,
                     Communication, Additional_Evidence,
-                    Update_time, Updated_by
+                    Update_time, Updated_by, Created_time
                 ) VALUES (
                     :Case_ID, :Sales_Order_Business_Key, :Status,
                     :VAT_Problem_Type, :Recommended_Product_Value,
@@ -1218,7 +1229,7 @@ def upsert_investigation_set(so_row: dict, sor_row: dict, soc_row: dict) -> None
                     :VAT_Gap_Fee, :Evaluation_by,
                     :Proposed_Action_Tax, :Proposed_Action_Customs,
                     :Communication, :Additional_Evidence,
-                    :Update_time, :Updated_by
+                    :Update_time, :Updated_by, :Created_time
                 )
             """, soc_row)
     finally:
@@ -1257,11 +1268,12 @@ def _hydrate_row(r) -> dict:
 def get_all_cases_hydrated(status: str | None = None, limit: int = 200) -> list[dict]:
     """Return cases joined with Sales_Order + Sales_Order_Risk."""
     conn = _connect(INVESTIGATION_DB)
+    # Oldest cases first (FIFO): operators triage in the order they were opened.
     if status:
-        sql = _HYDRATED_CASE_SQL + " WHERE c.Status = ? ORDER BY c.Update_time DESC LIMIT ?"
+        sql = _HYDRATED_CASE_SQL + " WHERE c.Status = ? ORDER BY c.Created_time ASC LIMIT ?"
         rows = conn.execute(sql, (status, limit)).fetchall()
     else:
-        sql = _HYDRATED_CASE_SQL + " ORDER BY c.Update_time DESC LIMIT ?"
+        sql = _HYDRATED_CASE_SQL + " ORDER BY c.Created_time ASC LIMIT ?"
         rows = conn.execute(sql, (limit,)).fetchall()
     conn.close()
     return [_hydrate_row(r) for r in rows]
