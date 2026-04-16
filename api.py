@@ -166,6 +166,14 @@ _sse_queues:          set[asyncio.Queue] = set()   # live-transaction stream sub
 _sim_state_sse:       set[asyncio.Queue] = set()   # pipeline + status stream subscribers
 _rg_case_sse:         set[asyncio.Queue] = set()   # Revenue Guardian case stream subscribers
 
+# ── VAT Fraud Detection agent queue ─────────────────────────────────────────
+# Single asyncio queue + single worker. LM Studio serializes inference
+# internally; running >1 worker would just stack up locally with no gain.
+AGENT_WORKERS         = 1
+_agent_queue:         asyncio.Queue[str] | None = None  # case_ids awaiting AI analysis
+_agent_in_progress:   str | None = None                  # case_id currently processing
+STATUS_AI_INVESTIGATING = "AI Investigation in Progress"
+
 
 def _push_rg_case_sse(payload: dict) -> None:
     """Push a case event to all connected Revenue Guardian SSE clients."""
@@ -850,6 +858,13 @@ async def lifespan(app: FastAPI):
     # to the new data model tables (Sales_Order + Sales_Order_Risk)
     asyncio.create_task(_sim_state_broadcaster())
 
+    # VAT Fraud Detection agent queue + worker(s). Initialise the queue
+    # inside the running loop so put/get bind to the right loop.
+    global _agent_queue
+    _agent_queue = asyncio.Queue()
+    for _ in range(AGENT_WORKERS):
+        asyncio.create_task(_agent_worker())
+
     yield
 
 
@@ -1200,6 +1215,110 @@ def _emit_case_updated_sse(case_id: str, action: str) -> None:
     _push_rg_case_sse({"event": "case_updated", "action": action, "case": case})
 
 
+# ── VAT Fraud Detection agent: queue + worker ───────────────────────────────
+
+async def _enqueue_for_agent(case_id: str) -> None:
+    """Push a case_id onto the agent queue. No-op if the queue isn't ready."""
+    if _agent_queue is None:
+        return
+    await _agent_queue.put(case_id)
+
+
+def _build_agent_tx(case: dict) -> dict:
+    """Shape the case as the tx dict the analyser expects."""
+    return {
+        "transaction_id":   case.get("Sales_Order_ID") or case.get("Sales_Order_Business_Key"),
+        "seller_name":      case.get("Seller_Name"),
+        "seller_country":   case.get("Country_Origin"),
+        "buyer_country":    case.get("Country_Destination"),
+        "item_description": case.get("Product_Description"),
+        "item_category":    case.get("HS_Product_Category"),
+        "value":            case.get("Product_Value"),
+        "vat_rate":         case.get("VAT_Rate"),
+        "vat_amount":       case.get("VAT_Fee"),
+    }
+
+
+async def _agent_worker() -> None:
+    """Single consumer of the agent queue. Country-of-destination gate:
+    IE → real subprocess analyser; everything else → 5 s sleep + uncertain.
+    On completion: write AI_Analysis, flip Status to "Under Review by Tax",
+    append a Communication entry, and broadcast case_updated SSE.
+    """
+    global _agent_in_progress
+    from lib.database import get_case_hydrated, update_case
+    from lib.agent_bridge import analyse_transaction_sync
+
+    assert _agent_queue is not None
+    while True:
+        case_id = await _agent_queue.get()
+        _agent_in_progress = case_id
+        try:
+            case = get_case_hydrated(case_id)
+            if not case:
+                continue
+
+            destination = (case.get("Country_Destination") or "").upper()
+            if destination == "IE":
+                tx = _build_agent_tx(case)
+                result = await asyncio.to_thread(analyse_transaction_sync, tx)
+            else:
+                # Out-of-scope country: short-circuit with a fixed delay so
+                # the UI still shows the AI step taking visible time.
+                await asyncio.sleep(5)
+                result = {
+                    "verdict":   "uncertain",
+                    "reasoning": f"Model for country '{destination or 'unknown'}' failed to run.",
+                    "success":   False,
+                }
+
+            verdict   = result.get("verdict", "uncertain")
+            reasoning = result.get("reasoning", "")
+            now_iso   = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+
+            comm = case.get("Communication", []) or []
+            comm.append({
+                "date":    now_iso,
+                "from":    "VAT Fraud Detection Agent",
+                "action":  f"verdict: {verdict}",
+                "message": reasoning,
+            })
+            update_case(case_id, {
+                "Status":        "Under Review by Tax",
+                "AI_Analysis":   f"[{verdict}] {reasoning}",
+                # AI_Confidence intentionally left null — agent does not
+                # currently emit a numeric confidence value.
+                "Update_time":   now_iso,
+                "Updated_by":    "VAT Fraud Detection Agent",
+                "Communication": comm,
+            })
+            _emit_case_updated_sse(case_id, "ai_complete")
+        except Exception as e:
+            # Don't crash the worker on a single bad case
+            try:
+                from lib.database import update_case
+                now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+                update_case(case_id, {
+                    "Status":      "Under Review by Tax",
+                    "AI_Analysis": f"[uncertain] Agent worker error: {e}",
+                    "Update_time": now_iso,
+                    "Updated_by":  "VAT Fraud Detection Agent",
+                })
+                _emit_case_updated_sse(case_id, "ai_complete")
+            except Exception:
+                pass
+        finally:
+            _agent_in_progress = None
+            _agent_queue.task_done()
+
+
+@app.get("/api/rg/agent/queue")
+def api_rg_agent_queue():
+    """Live queue depth + current case under analysis. UI feedback only."""
+    depth = _agent_queue.qsize() if _agent_queue is not None else 0
+    return {"depth": depth, "in_progress": _agent_in_progress}
+
+
 @app.post("/api/rg/cases/{case_id}/customs-action")
 async def api_rg_customs_action(case_id: str, body: dict):
     """
@@ -1220,7 +1339,9 @@ async def api_rg_customs_action(case_id: str, body: dict):
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
 
     status_map = {
-        "tax_review":       "Under Review by Tax",
+        # tax_review goes through the AI agent first; the worker will flip
+        # status to "Under Review by Tax" once it has produced a verdict.
+        "tax_review":       STATUS_AI_INVESTIGATING,
         "retainment":       "Closed",
         "release":          "Closed",
         "input_requested":  "Requested Input by Third Party",
@@ -1252,6 +1373,8 @@ async def api_rg_customs_action(case_id: str, body: dict):
         await _publish_investigation_outcome(
             case_id, "retained" if action == "retainment" else "released"
         )
+    if action == "tax_review":
+        await _enqueue_for_agent(case_id)
     return {"ok": True}
 
 
