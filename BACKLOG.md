@@ -2,6 +2,28 @@
 
 ---
 
+## Third-party input loop — currently a workflow dead-end
+
+When a Customs or Tax officer triggers **Request Input from Third Party**,
+the case transitions to `Status = "Requested Input by Third Party"` and
+sits there indefinitely. There is no:
+
+- "Response received" action / endpoint to bring it back into a queue
+- Audit field for *which third party* was contacted or *what was asked*
+  (only an unstructured Communication entry)
+- Reminder / escalation timer for stale input requests
+
+The case remains visible on both Customs and Tax pages but has no
+defined exit path other than the officer manually choosing a different
+action (release / retain / submit-for-tax-review), which silently
+overwrites the pending-input status.
+
+**When this matters:** the moment the demo includes a real third-party
+back-and-forth scenario, this gap will block the flow. Acceptable for
+now; document if a stakeholder asks.
+
+---
+
 ## Three-outcome risk engine results (flagged / clear / insufficient_data)
 
 Currently each risk engine returns a binary `flagged: true | false`.
