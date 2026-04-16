@@ -172,7 +172,8 @@ _rg_case_sse:         set[asyncio.Queue] = set()   # Revenue Guardian case strea
 AGENT_WORKERS         = 1
 _agent_queue:         asyncio.Queue[str] | None = None  # case_ids awaiting AI analysis
 _agent_in_progress:   str | None = None                  # case_id currently processing
-STATUS_AI_INVESTIGATING = "AI Investigation in Progress"
+
+from lib import case_statuses as STATUS
 
 
 def _push_rg_case_sse(payload: dict) -> None:
@@ -742,7 +743,7 @@ async def _ct_risk_management_factory() -> None:
         soc_row = {
             "Case_ID":                          case_id,
             "Sales_Order_Business_Key":         bk,
-            "Status":                           "New",
+            "Status":                           STATUS.NEW,
             "VAT_Problem_Type":                 problem_type,
             "Recommended_Product_Value":        None,
             "Recommended_VAT_Product_Category": None,
@@ -1284,7 +1285,7 @@ async def _agent_worker() -> None:
                 "message": reasoning,
             })
             update_case(case_id, {
-                "Status":        "Under Review by Tax",
+                "Status":        STATUS.UNDER_REVIEW_BY_TAX,
                 "AI_Analysis":   f"[{verdict}] {reasoning}",
                 # AI_Confidence intentionally left null — agent does not
                 # currently emit a numeric confidence value.
@@ -1299,7 +1300,7 @@ async def _agent_worker() -> None:
                 from lib.database import update_case
                 now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
                 update_case(case_id, {
-                    "Status":      "Under Review by Tax",
+                    "Status":      STATUS.UNDER_REVIEW_BY_TAX,
                     "AI_Analysis": f"[uncertain] Agent worker error: {e}",
                     "Update_time": now_iso,
                     "Updated_by":  "VAT Fraud Detection Agent",
@@ -1340,11 +1341,11 @@ async def api_rg_customs_action(case_id: str, body: dict):
 
     status_map = {
         # tax_review goes through the AI agent first; the worker will flip
-        # status to "Under Review by Tax" once it has produced a verdict.
-        "tax_review":       STATUS_AI_INVESTIGATING,
-        "retainment":       "Closed",
-        "release":          "Closed",
-        "input_requested":  "Requested Input by Third Party",
+        # status to UNDER_REVIEW_BY_TAX once it has produced a verdict.
+        "tax_review":       STATUS.AI_INVESTIGATING,
+        "retainment":       STATUS.CLOSED,
+        "release":          STATUS.CLOSED,
+        "input_requested":  STATUS.REQUESTED_INPUT,
     }
     new_status = status_map.get(action)
     if not new_status:
@@ -1411,11 +1412,11 @@ def api_rg_tax_action(case_id: str, body: dict):
 
     # Propagate status back for customs visibility
     if action == "risk_confirmed":
-        updates["Status"] = "Under Review by Customs"
+        updates["Status"] = STATUS.UNDER_REVIEW_BY_CUSTOMS
     elif action == "no_limited_risk":
-        updates["Status"] = "Under Review by Customs"
+        updates["Status"] = STATUS.UNDER_REVIEW_BY_CUSTOMS
     elif action == "input_requested":
-        updates["Status"] = "Requested Input by Third Party"
+        updates["Status"] = STATUS.REQUESTED_INPUT
 
     comm = case.get("Communication", [])
     if not isinstance(comm, list):
@@ -1449,7 +1450,7 @@ async def api_rg_final_decision(case_id: str, body: dict):
         return JSONResponse(status_code=400, content={"detail": f"Unknown decision: {decision}"})
 
     updates: dict = {
-        "Status": "Closed",
+        "Status": STATUS.CLOSED,
         "Proposed_Action_Customs": {"released": "release", "retained": "retain", "refused": "refuse"}[decision],
         "Update_time": now_iso,
         "Updated_by": officer,
