@@ -1100,8 +1100,8 @@ function PipelineDiagram({ pipeline }) {
                      + (customStatus.custom_release    || 0)
                      + (customStatus.custom_retain     || 0)
 
-  // Row 1: three processing zones stacked
-  const OV_H = 94, RT_H = 230, MS_H = 110, LGAP = 10
+  // Row 1: three processing zones stacked (OV + RT + MS)
+  const OV_H = 94, RT_H = 310, MS_H = 110, LGAP = 10
   const ROW1_H = OV_H + LGAP + RT_H + LGAP + MS_H
   const yOV = OV_H / 2
   const yRT = OV_H + LGAP + RT_H / 2
@@ -1111,18 +1111,18 @@ function PipelineDiagram({ pipeline }) {
   const ZONE_W = 280
   // Factory widths sized to their text content — no wider than needed.
   const OV_FACTORY_W = 220    // "Sales Order Validation"
-  const RT_FACTORY_W = 180    // "RT Risk As. 1/2"
-  // Shared width for the three row-1 output brokers
-  // (Sales Order Validation / RT Risk Outcome)
+  const RT_FACTORY_W = 180    // "RT Risk As. 1/2/4"
+  // Shared width for the output brokers
   const OUT_BROKER_W = 170
 
-  // RT zone internal row geometry (two stacked broker rows, outcomes flow to Automated Assessment Factory)
-  const RT_ROW_H   = 84
-  const RT_ROW_GAP = 10
-  const RT_STACK_H = RT_ROW_H * 2 + RT_ROW_GAP    // 178
-  const rtTopY     = RT_ROW_H / 2                  // 42  — center of row 1
-  const rtBotY     = RT_ROW_H + RT_ROW_GAP + RT_ROW_H / 2  // 136 — center of row 2
-  const rtOutY     = RT_STACK_H / 2                // 89  — fan-in output
+  // RT zone internal row geometry (three stacked engine rows)
+  const RT_ROW_H   = 78
+  const RT_ROW_GAP = 8
+  const RT_STACK_H = RT_ROW_H * 3 + RT_ROW_GAP * 2  // 250
+  const rtTopY     = RT_ROW_H / 2                     // 39  — center of row 1
+  const rtMidY     = RT_ROW_H + RT_ROW_GAP + RT_ROW_H / 2  // 125 — center of row 2
+  const rtBotY     = (RT_ROW_H + RT_ROW_GAP) * 2 + RT_ROW_H / 2  // 211 — center of row 3
+  const rtOutY     = RT_STACK_H / 2                    // 125 — fan-in output
 
   // Terminal-event sum = number of transactions stored to the DB since reset
   const newStored =
@@ -1220,10 +1220,10 @@ function PipelineDiagram({ pipeline }) {
                       small upward translate balances the gap on either side
                       without affecting layout — the children stay centered on
                       their flex row, the whole row just shifts up by 18 px. */}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 0, height: '100%', justifyContent: 'center', transform: 'translateY(-18px)' }}>
-                    {/* Entry fan-out */}
-                    <FanOutSVG height={RT_STACK_H} targetYs={[rtTopY, rtBotY]} width={24} />
-                    {/* Stacked RT1 + RT2 engine factories with arrows */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 0, height: '100%', justifyContent: 'center', transform: 'translateY(-14px)' }}>
+                    {/* Internal fan-out for 3 engines */}
+                    <FanOutSVG height={RT_STACK_H} targetYs={[rtTopY, rtMidY, rtBotY]} width={24} />
+                    {/* Stacked RT1 + RT2 + RT4 engine factories with arrows */}
                     <div style={{ display: 'flex', flexDirection: 'column', gap: RT_ROW_GAP }}>
                       <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center', gap: 4 }}>
                         <FactoryNode icon="⚖️" label="RT Risk As. 1" description="VAT ratio deviation" sm width={RT_FACTORY_W}
@@ -1231,8 +1231,13 @@ function PipelineDiagram({ pipeline }) {
                         <Arrow />
                       </div>
                       <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center', gap: 4 }}>
-                        <FactoryNode icon="🔍" label="RT Risk As. 2" description="Watchlist lookup" sm width={RT_FACTORY_W}
-                          tooltip="RT Risk Assessment 2 — flags transactions whose seller or route appears on the active watchlist. Publishes to the unified RT Risk Outcome broker." />
+                        <FactoryNode icon="🔍" label="RT Risk As. 2" description="ML watchlist lookup" sm width={RT_FACTORY_W}
+                          tooltip="RT Risk Assessment 2 — 4-tuple lookup against ml_risk_rules (seller × origin × category × destination). Returns a continuous risk score 0–1 plus per-dimension weights." />
+                        <Arrow />
+                      </div>
+                      <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <FactoryNode icon="📝" label="RT Risk As. 4" description="Description vagueness" sm width={RT_FACTORY_W}
+                          tooltip="RT Risk Assessment 4 — scores how vague or generic the product description is (0 = specific, 1 = vague). Uses sentence embeddings + cosine similarity to a vague-text anchor. Not yet implemented." />
                         <Arrow />
                       </div>
                     </div>
@@ -1356,7 +1361,7 @@ function PipelineDiagram({ pipeline }) {
             {overlayPaths && (() => {
               const grey = '#adb5bd'
               const topRunwayY = 4                                        // just inside the top edge
-              const bottomRunwayY = overlayPaths.containerH - 4           // just inside the bottom edge
+              const bottomRunwayY = overlayPaths.containerH + 14          // below all content (overflow: visible)
               // Single exit point: right edge of Entry, vertically centred
               const startX = overlayPaths.ex
               const startY = overlayPaths.ey
@@ -1385,7 +1390,7 @@ function PipelineDiagram({ pipeline }) {
                                fill={grey} />
                       <text x={overlayPaths.hubRight + 14} y={(overlayPaths.iy + overlayPaths.hubBottom) / 2 + 3}
                             fontSize="7" fill={grey} fontWeight="600" writingMode="tb">
-                        Inv Outcome → DB Store
+                        Inv Outcome → Exit Process
                       </text>
                     </>
                   )}
@@ -1400,7 +1405,7 @@ function PipelineDiagram({ pipeline }) {
                                fill={grey} />
                       <text x={(startX + overlayPaths.dbx) / 2} y={bottomRunwayY - 4}
                             textAnchor="middle" fontSize="8" fill={grey} fontWeight="600">
-                        Sales Order Event → DB Store Factory
+                        Sales Order Event → Exit Process Factory
                       </text>
                     </>
                   )}
