@@ -7,6 +7,7 @@ which March-2026 transactions have been replayed.
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -156,6 +157,21 @@ CREATE TABLE IF NOT EXISTS suspicion_types (
     sort_order  INTEGER NOT NULL DEFAULT 0
 );
 """
+
+_SALES_ORDER_STATUSES_DDL = """
+CREATE TABLE IF NOT EXISTS sales_order_statuses (
+    name        TEXT    PRIMARY KEY,
+    description TEXT,
+    sort_order  INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+_SEED_SALES_ORDER_STATUSES = [
+    ("Under Investigation", "Set at record creation when the C&T factory opens a case", 10),
+    ("To Be Released",      "Set by the Customs officer when recommending release",     20),
+    ("To Be Retained",      "Set by the Customs officer when recommending retainment",  30),
+]
+
 
 _SEED_VAT_CATEGORIES = [
     ("Educational Material", 9.0,  "Books, learning aids", 10),
@@ -405,6 +421,7 @@ def init_european_custom_db() -> None:
     _init_ddl(EUROPEAN_CUSTOM_DB, _EU_REGIONS_DDL)
     _init_ddl(EUROPEAN_CUSTOM_DB, _SUSPICION_TYPES_DDL)
     _init_ddl(EUROPEAN_CUSTOM_DB, _ML_RISK_RULES_DDL)
+    _init_ddl(EUROPEAN_CUSTOM_DB, _SALES_ORDER_STATUSES_DDL)
     _seed_reference_tables()
     _seed_ml_risk_rules_from_xlsx()
 
@@ -1139,6 +1156,10 @@ def _seed_reference_tables() -> None:
             "INSERT OR IGNORE INTO suspicion_types (name, description, icon, color, sort_order) VALUES (?, ?, ?, ?, ?)",
             _SEED_SUSPICION_TYPES,
         )
+        conn.executemany(
+            "INSERT OR IGNORE INTO sales_order_statuses (name, description, sort_order) VALUES (?, ?, ?)",
+            _SEED_SALES_ORDER_STATUSES,
+        )
     conn.close()
 
 
@@ -1247,6 +1268,15 @@ def lookup_ml_risk_rule(seller: str, country_origin: str,
     return dict(row) if row else None
 
 
+def get_sales_order_statuses() -> list[dict]:
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    rows = conn.execute(
+        "SELECT name, description FROM sales_order_statuses ORDER BY sort_order, name"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def get_suspicion_types() -> list[dict]:
     conn = _connect(EUROPEAN_CUSTOM_DB)
     rows = conn.execute(
@@ -1254,6 +1284,19 @@ def get_suspicion_types() -> list[dict]:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def update_sales_order_status(business_key: str, status: str) -> bool:
+    """Update Sales_Order.Status in investigation.db for a given business key."""
+    conn = _connect(INVESTIGATION_DB)
+    with conn:
+        cur = conn.execute(
+            "UPDATE Sales_Order SET Status = ?, Update_time = ? WHERE Sales_Order_Business_Key = ?",
+            (status, datetime.now(timezone.utc).isoformat(), business_key),
+        )
+    changed = cur.rowcount > 0
+    conn.close()
+    return changed
 
 
 def seed_open_cases_if_empty() -> int:

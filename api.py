@@ -811,6 +811,7 @@ async def _ct_risk_management_factory() -> None:
     (see customs-action retainment/release and final-decision endpoints).
     """
     from lib.database import upsert_investigation_set, get_case_hydrated
+    from lib import sales_order_statuses as SO_STATUS
     import uuid as _uuid
 
     q = broker.subscribe(ASSESSMENT_OUTCOME)
@@ -848,7 +849,7 @@ async def _ct_risk_management_factory() -> None:
             "Seller_Name":              msg.get("Seller_Name"),
             "Country_Origin":           msg.get("Country_Origin"),
             "Country_Destination":      msg.get("Country_Destination"),
-            "Status":                   route,
+            "Status":                   SO_STATUS.UNDER_INVESTIGATION,
             "Update_time":              now_iso,
             "Updated_by":               "system",
         }
@@ -1275,12 +1276,14 @@ def api_reference():
     """
     from lib.database import (
         get_vat_categories, get_risk_levels, get_eu_regions, get_suspicion_types,
+        get_sales_order_statuses,
     )
     return {
-        "vat_categories":  get_vat_categories(),
-        "risk_levels":     get_risk_levels(),
-        "regions":         get_eu_regions(),
-        "suspicion_types": get_suspicion_types(),
+        "vat_categories":        get_vat_categories(),
+        "risk_levels":           get_risk_levels(),
+        "regions":               get_eu_regions(),
+        "suspicion_types":       get_suspicion_types(),
+        "sales_order_statuses":  get_sales_order_statuses(),
     }
 
 
@@ -1503,6 +1506,14 @@ async def api_rg_customs_action(case_id: str, body: dict):
     }
     if action in ("retainment", "release"):
         updates["Proposed_Action_Customs"] = "retain" if action == "retainment" else "release"
+        # Update the Sales_Order.Status in investigation.db in parallel
+        # with the case closure.
+        from lib.database import update_sales_order_status
+        from lib import sales_order_statuses as SO_STATUS
+        bk = case.get("Sales_Order_Business_Key")
+        if bk:
+            so_status = SO_STATUS.TO_BE_RELEASED if action == "release" else SO_STATUS.TO_BE_RETAINED
+            update_sales_order_status(bk, so_status)
 
     # Append to communication log
     comm = case.get("Communication", [])
