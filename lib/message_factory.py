@@ -292,16 +292,19 @@ def build_file_payload(topic: str, message: dict) -> dict:
 
     if topic == _TOPIC_RT_RISK_1:
         outcome = {
+            "risk":     message.get("risk"),
             "flagged":  message.get("flagged"),
             "alarm_id": message.get("alarm_id"),
         }
     elif topic == _TOPIC_RT_RISK_2:
         outcome = {
+            "risk":    message.get("risk"),
             "flagged": message.get("flagged"),
             "reason":  message.get("reason"),
         }
     elif topic == _TOPIC_RT_RISK_3:
         outcome = {
+            "risk":    message.get("risk"),
             "flagged": message.get("flagged"),
             "reason":  message.get("reason"),
         }

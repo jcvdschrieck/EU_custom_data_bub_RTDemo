@@ -298,6 +298,10 @@ async def _RT_risk_monitoring_1_factory() -> None:
     Subscriber of Sales-order Event Broker.
     Runs the VAT/value ratio deviation check (7-day vs 8-week baseline).
     Publishes to the unified RT_RISK_OUTCOME topic with engine="vat_ratio".
+
+    Primary signal: `risk` in [0, 1]. Binary for now (1.0 when suspicious,
+    0.0 otherwise); could scale with deviation_pct later. `flagged` is
+    derived for legacy counter compatibility.
     """
     from lib.alarm_checker import check_alarm
 
@@ -307,9 +311,11 @@ async def _RT_risk_monitoring_1_factory() -> None:
 
         result = check_alarm(tx)   # None | {"suspicious", "alarm_id", "new_alarm"}
 
-        flagged   = bool(result and result.get("suspicious"))
-        alarm_id  = result.get("alarm_id")  if result else None
-        new_alarm = result.get("new_alarm") if result else None
+        suspicious = bool(result and result.get("suspicious"))
+        risk       = 1.0 if suspicious else 0.0
+        flagged    = risk >= 0.5
+        alarm_id   = result.get("alarm_id")  if result else None
+        new_alarm  = result.get("new_alarm") if result else None
 
         if new_alarm:
             _live_alarms.insert(0, new_alarm)
@@ -319,6 +325,7 @@ async def _RT_risk_monitoring_1_factory() -> None:
         await broker.publish(RT_RISK_OUTCOME, {
             "engine":   "vat_ratio",
             "tx":       tx,
+            "risk":     risk,
             "flagged":  flagged,
             "alarm_id": alarm_id,
             "alarm":    new_alarm or next(
@@ -326,7 +333,7 @@ async def _RT_risk_monitoring_1_factory() -> None:
             ) if flagged else None,
         })
         # Legacy counter
-        await broker.publish(RT_RISK_1_OUTCOME, {"tx": tx, "flagged": flagged})
+        await broker.publish(RT_RISK_1_OUTCOME, {"tx": tx, "risk": risk, "flagged": flagged})
 
 
 # ── RT Risk Monitoring 2 Factory (ML watchlist — 4-tuple + per-dim weights) ──
@@ -368,11 +375,13 @@ async def _RT_risk_monitoring_2_factory() -> None:
         )
 
         if rule is None:
+            risk    = 0.0
             flagged = False
             payload: dict = {
                 "engine":  "watchlist",
                 "tx":      tx,
-                "flagged": False,
+                "risk":    risk,
+                "flagged": flagged,
                 "reason":  "clear",
             }
         else:
@@ -381,9 +390,9 @@ async def _RT_risk_monitoring_2_factory() -> None:
             payload = {
                 "engine":        "watchlist",
                 "tx":            tx,
+                "risk":          risk,
                 "flagged":       flagged,
                 "reason":        "ml_watchlist_match" if flagged else "ml_watchlist_low_risk",
-                "risk":          risk,
                 "description":   rule.get("description"),
                 # Per-dimension weighted sub-scores — propagated into
                 # ASSESSMENT_OUTCOME by the release factory, then written
@@ -396,7 +405,7 @@ async def _RT_risk_monitoring_2_factory() -> None:
 
         await broker.publish(RT_RISK_OUTCOME, payload)
         # Legacy counter
-        await broker.publish(RT_RISK_2_OUTCOME, {"tx": tx, "flagged": flagged})
+        await broker.publish(RT_RISK_2_OUTCOME, {"tx": tx, "risk": risk, "flagged": flagged})
 
 
 # ── RT Risk Monitoring 3 Factory (Ireland-specific watchlist) ───────────────
@@ -442,15 +451,18 @@ async def _RT_risk_monitoring_3_factory() -> None:
             await asyncio.sleep(_random.uniform(1.0, 5.0))
             seller_id      = tx.get("seller_id", "")
             seller_country = (tx.get("seller_country") or "").upper()
-            flagged = (seller_id, seller_country) in IE_WATCHLIST
+            matched = (seller_id, seller_country) in IE_WATCHLIST
+            risk    = 1.0 if matched else 0.0
+            flagged = risk >= 0.5
             await broker.publish(RT_RISK_OUTCOME, {
                 "engine":  "ireland_watchlist",
                 "tx":      tx,
+                "risk":    risk,
                 "flagged": flagged,
                 "reason":  "ie_watchlist_match" if flagged else "clear",
             })
             # Legacy counter
-            await broker.publish(RT_RISK_3_OUTCOME, {"tx": tx, "flagged": flagged})
+            await broker.publish(RT_RISK_3_OUTCOME, {"tx": tx, "risk": risk, "flagged": flagged})
 
         # Fire-and-forget so the engine can pick up the next event immediately.
         asyncio.create_task(_process())
@@ -563,7 +575,13 @@ async def _release_factory() -> None:
         })
 
     def _compute_score(entry: dict) -> tuple[float, float, str]:
-        """Return (score, confidence, route)."""
+        """Return (score, confidence, route).
+
+        Score is the average of per-engine `risk` values (each in [0, 1]),
+        not a flag count. Engines that output a binary risk contribute
+        exactly 0.0 or 1.0; engines that output a continuous score (e.g.
+        the ML watchlist) contribute their raw value.
+        """
         outcomes = entry["risk_outcomes"]
         n_received = len(outcomes)
         confidence = n_received / TOTAL_RISK_ENGINES if TOTAL_RISK_ENGINES > 0 else 0
@@ -571,8 +589,8 @@ async def _release_factory() -> None:
         if n_received == 0:
             score = 0.5   # no outcomes → 50% (uncertain)
         else:
-            flagged = sum(1 for o in outcomes.values() if o.get("flagged"))
-            score = flagged / n_received
+            risks = [float(o.get("risk", 0.0) or 0.0) for o in outcomes.values()]
+            score = sum(risks) / n_received
 
         if score > THRESHOLD_RETAIN:
             route = "red"
