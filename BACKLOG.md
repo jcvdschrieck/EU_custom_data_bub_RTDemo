@@ -2,6 +2,31 @@
 
 ---
 
+## Review event statuses / values of the Automated Assessment Factory
+
+The Release Factory (Automated Assessment) publishes `ASSESSMENT_OUTCOME`
+with a `route` field (`release` / `retain` / `investigate`) and an
+`Overall_Risk_Level` field (`green` / `amber` / `red`). These values are
+**not centralised** in a reference table or constants module — they're
+inline strings in `api.py::_publish_assessment`. Similarly the `status`
+field on the `RT_SCORE` legacy counter carries `green` / `amber` / `red`
+as raw strings.
+
+**What to review:**
+- Should these route/level labels live in a reference table (like
+  `case_statuses` and `sales_order_statuses`) or a constants module
+  (like `lib/case_statuses.py`)?
+- Are the labels user-facing? If so, do they need human-readable
+  equivalents (e.g. `"release"` → `"Automated Release"`)?
+- The pipeline diagram currently colour-codes by these raw strings —
+  a rename would need a coordinated frontend update.
+
+**When this matters:** the moment a new route is added (e.g.
+`escalate`) or the label vocabulary is exposed to the Revenue Guardian
+frontend.
+
+---
+
 ## Third-party input loop — currently a workflow dead-end
 
 When a Customs or Tax officer triggers **Request Input from Third Party**,
