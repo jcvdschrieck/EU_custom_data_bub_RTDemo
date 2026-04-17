@@ -1193,7 +1193,12 @@ function PipelineDiagram({ pipeline }) {
             </div>
 
             {/* FanOut: Entry → Sales Order Validation + RT Risk Assessment + MS Risk Monitors */}
-            <FanOutSVG height={ROW1_H} targetYs={[yOV, yRT, yMS]} width={48} />
+            <FanOutMixedSVG height={ROW1_H} width={48}
+              targets={[
+                { y: yOV, dashed: false },
+                { y: yRT, dashed: false },
+                { y: yMS, dashed: true },
+              ]} />
 
             {/* Three parallel zones stacked — all at ZONE_W so Row 1 is visually aligned */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
@@ -1263,7 +1268,7 @@ function PipelineDiagram({ pipeline }) {
             <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
               <div style={{ height: OV_H, display: 'flex', alignItems: 'center' }}><Arrow /></div>
               <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}><Arrow /></div>
-              <div style={{ height: MS_H, display: 'flex', alignItems: 'center' }}><Arrow /></div>
+              <div style={{ height: MS_H, display: 'flex', alignItems: 'center' }}><Arrow dashed /></div>
             </div>
 
             {/* Output brokers — OV validation + RT Risk Outcome (spanning RT + MS zones) */}
@@ -1415,6 +1420,7 @@ function PipelineDiagram({ pipeline }) {
         {/* Element types */}
         <LegendItem color="var(--eu-blue)" bg="var(--eu-blue-light)" label="Event Broker" />
         <LegendItem color="#868e96" bg="#f8f9fa" label="Factory" />
+        <LegendItem color="#8fb8de" bg="#f6f9fc" label="Member State Risk Monitors" />
         <LegendItem color="var(--eu-blue)" bg="var(--eu-blue-light)" label="Custom Outcome (terminal broker)" />
         <LegendItem color="var(--text-muted)" bg="#ffffff" label="Processing zone" dashed />
 
