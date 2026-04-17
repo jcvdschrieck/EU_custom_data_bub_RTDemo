@@ -1358,6 +1358,9 @@ async def _publish_investigation_outcome(case_id: str, outcome: str) -> None:
         return
     await broker.publish(INVESTIGATION_OUTCOME, {
         "Case_ID":                  case_id,
+        # order_id is used by build_file_payload to derive the filename
+        # so each case gets its own persisted event file (not "unknown").
+        "order_id":                 case.get("Sales_Order_Business_Key") or case_id,
         "Sales_Order_Business_Key": case.get("Sales_Order_Business_Key"),
         "Sales_Order_ID":           case.get("Sales_Order_ID"),
         "outcome":                  outcome,   # released | retained | refused
