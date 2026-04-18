@@ -127,6 +127,7 @@ RELEASE_OUTCOME      = "assessment_outcome"   # alias
 RT_RISK_1_OUTCOME    = "rt_risk_1_outcome"
 RT_RISK_2_OUTCOME    = "rt_risk_2_outcome"
 RT_RISK_3_OUTCOME    = "rt_risk_3_outcome"   # Ireland-specific watchlist (engine 3)
+RT_RISK_4_OUTCOME    = "rt_risk_4_outcome"   # Description vagueness (engine 4)
 RT_SCORE             = "rt_score"
 RELEASE_EVENT        = "release_event"
 RETAIN_EVENT         = "retain_event"

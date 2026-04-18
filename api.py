@@ -123,14 +123,14 @@ from lib.broker import (
     broker,
     SALES_ORDER_EVENT, RT_RISK_OUTCOME, ORDER_VALIDATION,
     ASSESSMENT_OUTCOME, INVESTIGATION_OUTCOME, CUSTOM_OUTCOME,
-    RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME, RT_RISK_3_OUTCOME, RT_SCORE,  # legacy counters
+    RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME, RT_RISK_3_OUTCOME, RT_RISK_4_OUTCOME, RT_SCORE,  # legacy counters
     RELEASE_EVENT, RETAIN_EVENT, INVESTIGATE_EVENT,   # legacy counters
 )
 
 # Total number of risk monitoring engines. The release factory waits
 # for this many outcomes (or times out) before computing the score.
 # Adding a new risk engine = increment this + write the factory.
-TOTAL_RISK_ENGINES = 3
+TOTAL_RISK_ENGINES = 4
 from lib.config import DEFAULT_SPEED, MIN_SPEED, MAX_SPEED, QUEUE_SIZE
 from lib.database import (
     get_latest_transactions,
@@ -466,6 +466,70 @@ async def _RT_risk_monitoring_3_factory() -> None:
 
         # Fire-and-forget so the engine can pick up the next event immediately.
         asyncio.create_task(_process())
+
+
+# ── RT Risk Monitoring 4 Factory (Description Vagueness) ─────────────────────
+#
+# Scores how vague/generic the product description is. Uses sentence
+# embeddings (all-MiniLM-L6-v2) and cosine similarity to a set of vague
+# anchor texts. Higher similarity → higher risk (the description says
+# almost nothing useful for classification).
+
+_vagueness_model = None
+_vague_anchor_embedding = None
+
+def _get_vagueness_model():
+    global _vagueness_model, _vague_anchor_embedding
+    if _vagueness_model is None:
+        from sentence_transformers import SentenceTransformer
+        _vagueness_model = SentenceTransformer("all-MiniLM-L6-v2")
+        vague_anchors = [
+            "general goods", "miscellaneous items", "various products",
+            "stuff", "goods", "items", "products", "materials",
+            "other", "mixed", "assorted", "sample", "test",
+        ]
+        embs = _vagueness_model.encode(vague_anchors, normalize_embeddings=True)
+        _vague_anchor_embedding = embs.mean(axis=0)
+        _vague_anchor_embedding /= (_vague_anchor_embedding ** 2).sum() ** 0.5
+    return _vagueness_model, _vague_anchor_embedding
+
+
+async def _RT_risk_monitoring_4_factory() -> None:
+    """
+    Subscriber of Sales-order Event Broker.
+
+    Scores each product description on a vagueness scale [0, 1]:
+      0.0 = specific, detailed description
+      1.0 = maximally vague / generic
+
+    Uses cosine similarity between the description embedding and a
+    pre-computed "vague text" anchor embedding. The raw similarity
+    (typically 0.1–0.8) is clamped to [0, 1] and used as the risk score.
+    Flagged when risk >= 0.5.
+    """
+    q = broker.subscribe(SALES_ORDER_EVENT)
+    while True:
+        tx = await q.get()
+        description = (tx.get("item_description") or tx.get("product_description") or "").strip()
+
+        if not description:
+            risk = 1.0
+        else:
+            model, anchor = _get_vagueness_model()
+            emb = model.encode([description], normalize_embeddings=True)[0]
+            similarity = float((emb * anchor).sum())
+            risk = max(0.0, min(1.0, similarity))
+
+        flagged = risk >= 0.5
+
+        await broker.publish(RT_RISK_OUTCOME, {
+            "engine":  "description_vagueness",
+            "tx":      tx,
+            "risk":    risk,
+            "flagged": flagged,
+            "reason":  "vague_description" if flagged else "clear",
+        })
+        await broker.publish(RT_RISK_4_OUTCOME, {"tx": tx, "risk": risk, "flagged": flagged})
 
 
 # ── (RT Consolidation Factory removed — its logic is now inside
@@ -1003,6 +1067,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_RT_risk_monitoring_1_factory())
     asyncio.create_task(_RT_risk_monitoring_2_factory())
     asyncio.create_task(_RT_risk_monitoring_3_factory())
+    asyncio.create_task(_RT_risk_monitoring_4_factory())
     # Consolidation is now handled inside _release_factory (unified routing).
     asyncio.create_task(_order_validation_factory())
     # _arrival_notification_factory removed (Goods Transport flow eliminated)
@@ -1106,7 +1171,7 @@ def _compute_sim_state_snapshot() -> dict:
 
     # ── Pipeline block (same shape as GET /api/simulation/pipeline) ──
     topics = [
-        SALES_ORDER_EVENT, RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME, RT_RISK_3_OUTCOME,
+        SALES_ORDER_EVENT, RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME, RT_RISK_3_OUTCOME, RT_RISK_4_OUTCOME,
         RT_SCORE, ORDER_VALIDATION, ASSESSMENT_OUTCOME, INVESTIGATION_OUTCOME,
         CUSTOM_OUTCOME,
         RELEASE_EVENT, RETAIN_EVENT, INVESTIGATE_EVENT,
@@ -1119,6 +1184,7 @@ def _compute_sim_state_snapshot() -> dict:
             "rt_risk_1_flagged": count_field_value(RT_RISK_1_OUTCOME, "outcome.flagged", True),
             "rt_risk_2_flagged": count_field_value(RT_RISK_2_OUTCOME, "outcome.flagged", True),
             "rt_risk_3_flagged": count_field_value(RT_RISK_3_OUTCOME, "outcome.flagged", True),
+            "rt_risk_4_flagged": count_field_value(RT_RISK_4_OUTCOME, "outcome.flagged", True),
             "rt_score_green":    count_field_value(RT_SCORE, "outcome.risk_score", "green"),
             "rt_score_amber":    count_field_value(RT_SCORE, "outcome.risk_score", "amber"),
             "rt_score_red":      count_field_value(RT_SCORE, "outcome.risk_score", "red"),
@@ -1656,7 +1722,7 @@ def sim_pipeline():
     from lib.event_store import event_count, count_field_value
     from lib.broker import broker as _broker
     topics = [
-        SALES_ORDER_EVENT, RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME, RT_RISK_3_OUTCOME,
+        SALES_ORDER_EVENT, RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME, RT_RISK_3_OUTCOME, RT_RISK_4_OUTCOME,
         RT_SCORE, ORDER_VALIDATION, ASSESSMENT_OUTCOME, INVESTIGATION_OUTCOME,
         CUSTOM_OUTCOME,
         RELEASE_EVENT, RETAIN_EVENT, INVESTIGATE_EVENT,
@@ -1669,6 +1735,7 @@ def sim_pipeline():
             "rt_risk_1_flagged": count_field_value(RT_RISK_1_OUTCOME, "outcome.flagged", True),
             "rt_risk_2_flagged": count_field_value(RT_RISK_2_OUTCOME, "outcome.flagged", True),
             "rt_risk_3_flagged": count_field_value(RT_RISK_3_OUTCOME, "outcome.flagged", True),
+            "rt_risk_4_flagged": count_field_value(RT_RISK_4_OUTCOME, "outcome.flagged", True),
             "rt_score_green":    count_field_value(RT_SCORE, "outcome.risk_score", "green"),
             "rt_score_amber":    count_field_value(RT_SCORE, "outcome.risk_score", "amber"),
             "rt_score_red":      count_field_value(RT_SCORE, "outcome.risk_score", "red"),

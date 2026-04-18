@@ -1056,7 +1056,7 @@ function PipelineDiagram({ pipeline }) {
         const dbRect = dbStore.getBoundingClientRect()
         const iRect = invOut.getBoundingClientRect()
         dbx = dbRect.left + dbRect.width / 2 - cRect.left
-        dby = dbRect.top + dbRect.height / 2 - cRect.top
+        dby = dbRect.bottom - cRect.top                        // bottom edge — arrow arrives from below
         dbTop = dbRect.top - cRect.top
         ix = iRect.right - cRect.left
         iy = iRect.top + iRect.height / 2 - cRect.top
@@ -1168,7 +1168,7 @@ function PipelineDiagram({ pipeline }) {
 
       <div ref={pipelineRef} className="pipeline-scroll" style={{
         overflowX: 'auto', overflowY: 'hidden',
-        padding: '20px 20px 20px',
+        padding: '20px 20px 60px',
         borderBottom: '1px solid var(--border-light)',
       }}
         onScroll={(e) => {
@@ -1187,10 +1187,9 @@ function PipelineDiagram({ pipeline }) {
               children. */}
           <div ref={containerRef} style={{ display: 'flex', alignItems: 'flex-start', gap: 0, position: 'relative' }}>
 
-            {/* Entry Broker — centered at the midpoint between the two fan-out
-                targets (yOV and yRT) so it sits visually between both arrows. */}
-            <div style={{ height: ROW1_H, display: 'flex', alignItems: 'center',
-                          paddingTop: (yOV + yRT) / 2 - ROW1_H / 2 }}>
+            {/* Entry Broker — anchored at yRT so it aligns horizontally with
+                RT Risk Outcome and Automated Assessment Factory. */}
+            <div style={{ height: ROW1_H, paddingTop: Math.max(0, yRT - 55), boxSizing: 'border-box' }}>
               <Zone label="Entry">
                 <div ref={entryRef}>
                   <BrokerNode label="Sales-order Event" topicKey="SALES_ORDER"
@@ -1233,18 +1232,18 @@ function PipelineDiagram({ pipeline }) {
                     {/* Stacked RT1 + RT2 + RT4 engine factories with arrows */}
                     <div style={{ display: 'flex', flexDirection: 'column', gap: RT_ROW_GAP }}>
                       <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center', gap: 4 }}>
-                        <FactoryNode icon="⚖️" label="RT Risk As. 1" description="VAT ratio deviation" sm width={RT_FACTORY_W}
-                          tooltip="RT Risk Assessment 1 — flags transactions whose VAT-to-value ratio deviates from the supplier's historical baseline. Publishes to the unified RT Risk Outcome broker." />
+                        <FactoryNode icon="⚖️" label="VAT Ratio Monitor" description="7-day vs 8-week baseline" sm width={RT_FACTORY_W}
+                          tooltip="VAT Ratio Monitor — flags transactions whose VAT-to-value ratio deviates from the supplier's historical baseline (7-day window vs 8-week average). Binary risk: 0.0 or 1.0." />
                         <Arrow />
                       </div>
                       <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center', gap: 4 }}>
-                        <FactoryNode icon="🔍" label="RT Risk As. 2" description="ML watchlist lookup" sm width={RT_FACTORY_W}
-                          tooltip="RT Risk Assessment 2 — 4-tuple lookup against ml_risk_rules (seller × origin × category × destination). Returns a continuous risk score 0–1 plus per-dimension weights." />
+                        <FactoryNode icon="🔍" label="ML Risk Classifier" description="4-tuple rule lookup" sm width={RT_FACTORY_W}
+                          tooltip="ML Risk Classifier — looks up the 4-tuple (seller × origin × category × destination) against ml_risk_rules. Returns a continuous risk score 0–1 plus per-dimension weights." />
                         <Arrow />
                       </div>
                       <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center', gap: 4 }}>
-                        <FactoryNode icon="📝" label="RT Risk As. 4" description="Description vagueness" sm width={RT_FACTORY_W}
-                          tooltip="RT Risk Assessment 4 — scores how vague or generic the product description is (0 = specific, 1 = vague). Uses sentence embeddings + cosine similarity to a vague-text anchor. Not yet implemented." />
+                        <FactoryNode icon="📝" label="Vagueness Detector" description="product description NLP" sm width={RT_FACTORY_W}
+                          tooltip="Vagueness Detector — scores how vague or generic the product description is (0 = specific, 1 = vague). Uses sentence embeddings (all-MiniLM-L6-v2) and cosine similarity to a vague-text anchor." />
                         <Arrow />
                       </div>
                     </div>
@@ -1266,8 +1265,8 @@ function PipelineDiagram({ pipeline }) {
                     textAlign: 'center', marginBottom: 4,
                   }}>Member State Risk Monitors</div>
                   <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: 'calc(100% - 24px)' }}>
-                    <FactoryNode icon="🇮🇪" label="IE Watchlist" description="1–5 s · Ireland only" sm width={RT_FACTORY_W}
-                      tooltip="RT Risk Assessment 3 — Ireland-specific watchlist. Subscribes to Sales Order Event but only processes IE-bound orders. Uniform 1–5 s latency simulating a remote server managed by the Irish authority. Publishes to the unified RT Risk Outcome broker." />
+                    <FactoryNode icon="🇮🇪" label="IE Seller Watchlist" description="1–5 s · Ireland only" sm width={RT_FACTORY_W}
+                      tooltip="IE Seller Watchlist — Ireland-specific watchlist managed by the Irish customs authority. Only processes IE-bound orders; others are silently dropped. Uniform 1–5 s latency simulating a remote server. Can arrive after the assessment timer (3 s), demonstrating late-arriving engine results." />
                     <div style={{ width: 8 }} />
                     <Arrow />
                   </div>
@@ -1286,8 +1285,8 @@ function PipelineDiagram({ pipeline }) {
                   {/* Horizontal dashed arrow from MS zone */}
                   <line x1={0} y1={MS_H / 2} x2={22} y2={MS_H / 2} stroke="#adb5bd" strokeWidth={2} strokeDasharray="4,3" />
                   {/* Vertical dashed line going up to meet the RT broker row above */}
-                  <line x1={22} y1={MS_H / 2} x2={22} y2={-(LGAP + RT_H / 2 - MS_H / 2)} stroke="#adb5bd" strokeWidth={2} strokeDasharray="4,3" />
-                  <polygon points={`18,${-(LGAP + RT_H / 2 - MS_H / 2) + 4} 26,${-(LGAP + RT_H / 2 - MS_H / 2) + 4} 22,${-(LGAP + RT_H / 2 - MS_H / 2)}`} fill="#adb5bd" />
+                  <line x1={22} y1={MS_H / 2} x2={22} y2={-(LGAP + RT_H / 2)} stroke="#adb5bd" strokeWidth={2} strokeDasharray="4,3" />
+                  <polygon points={`18,${-(LGAP + RT_H / 2) + 4} 26,${-(LGAP + RT_H / 2) + 4} 22,${-(LGAP + RT_H / 2)}`} fill="#adb5bd" />
                 </svg>
               </div>
             </div>
@@ -1301,94 +1300,88 @@ function PipelineDiagram({ pipeline }) {
               </div>
               <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
                 <BrokerNode label="RT Risk Outcome" topicKey="RT_RISK_OUTCOME"
-                  count={(ev.rt_risk_1_outcome || 0) + (ev.rt_risk_2_outcome || 0) + (ev.rt_risk_3_outcome || 0)} sm width={OUT_BROKER_W}
+                  count={(ev.rt_risk_1_outcome || 0) + (ev.rt_risk_2_outcome || 0) + (ev.rt_risk_3_outcome || 0) + (ev.rt_risk_4_outcome || 0)} sm width={OUT_BROKER_W}
                   tooltip="RT_RISK_OUTCOME — unified topic. All risk engines (EU + Member State) publish here with an engine identifier. The Automated Assessment Factory subscribes and computes a consolidated risk score.">
-                  <FlaggedBadge flagged={(rf.rt_risk_1_flagged || 0) + (rf.rt_risk_2_flagged || 0) + (rf.rt_risk_3_flagged || 0)}
-                    total={(ev.rt_risk_1_outcome || 0) + (ev.rt_risk_2_outcome || 0) + (ev.rt_risk_3_outcome || 0)} />
+                  <FlaggedBadge flagged={(rf.rt_risk_1_flagged || 0) + (rf.rt_risk_2_flagged || 0) + (rf.rt_risk_3_flagged || 0) + (rf.rt_risk_4_flagged || 0)}
+                    total={(ev.rt_risk_1_outcome || 0) + (ev.rt_risk_2_outcome || 0) + (ev.rt_risk_3_outcome || 0) + (ev.rt_risk_4_outcome || 0)} />
                 </BrokerNode>
               </div>
               {/* Empty space at MS_H to preserve the column height */}
               <div style={{ height: MS_H }} />
             </div>
 
-            {/* Fan-in: 2 output brokers → Automated Assessment Factory */}
-            <FanInSVG height={ROW1_H} inputYs={[yOV, yRT]} outputY={(yOV + yRT) / 2} width={60} />
+            {/* Fan-in: 2 output brokers → center line at yRT */}
+            <FanInSVG height={ROW1_H} inputYs={[yOV, yRT]} outputY={yRT} width={60} />
 
-            {/* Automated Assessment Factory + Arrow + Assessment Outcome — all
-                centered at the midpoint between yOV and yRT */}
-            <div style={{ height: ROW1_H, display: 'flex', alignItems: 'center',
-                          paddingTop: (yOV + yRT) / 2 - ROW1_H / 2 }}>
-              <FactoryNode icon="🎯" label="Automated Assessment Factory" description="consolidates risk outcomes" sm
-                tooltip="Automated Assessment Factory — collects risk outcomes from all engines, computes a consolidated score (flagged/total, with confidence), then routes: score < 33% → Release, 33–66% → Investigate, > 66% → Retain. GREEN/AMBER paths wait for validation; RED fires immediately." />
-            </div>
-
-            <div style={{ height: ROW1_H, display: 'flex', alignItems: 'center',
-                          paddingTop: (yOV + yRT) / 2 - ROW1_H / 2 }}>
-              <Arrow />
-            </div>
-
-            <div style={{ height: ROW1_H, display: 'flex', alignItems: 'center',
-                          paddingTop: (yOV + yRT) / 2 - ROW1_H / 2 }}>
-              <BrokerNode label="Assessment Outcome" topicKey="ASSESSMENT_OUTCOME"
-                count={(ev.release_event || 0) + (ev.retain_event || 0) + (ev.investigate_event || 0)}
-                sm width={OUT_BROKER_W}
-                tooltip="ASSESSMENT_OUTCOME — unified topic carrying all routing decisions (release / retain / investigate) with the consolidated risk score and confidence.">
-                <ScoreBadges green={ev.release_event} amber={ev.investigate_event} red={ev.retain_event} />
-              </BrokerNode>
-            </div>
+            {/* Center-line elements: Assessment Factory → Arrow → Assessment Outcome
+                All anchored at yRT so they align with the RT Risk Outcome broker */}
+            {(() => {
+              const cPad = Math.max(0, yRT - 45)
+              return (
+                <>
+                  <div style={{ height: ROW1_H, paddingTop: cPad, boxSizing: 'border-box' }}>
+                    <FactoryNode icon="🎯" label="Automated Assessment Factory" description="consolidates risk outcomes" sm
+                      tooltip="Automated Assessment Factory — collects risk outcomes from all engines, computes a consolidated score (flagged/total, with confidence), then routes: score < 33% → Release, 33–66% → Investigate, > 66% → Retain." />
+                  </div>
+                  <div style={{ height: ROW1_H, paddingTop: cPad + 30, boxSizing: 'border-box' }}>
+                    <Arrow />
+                  </div>
+                  <div style={{ height: ROW1_H, paddingTop: cPad, boxSizing: 'border-box' }}>
+                    <BrokerNode label="Assessment Outcome" topicKey="ASSESSMENT_OUTCOME"
+                      count={(ev.release_event || 0) + (ev.retain_event || 0) + (ev.investigate_event || 0)}
+                      sm width={OUT_BROKER_W}
+                      tooltip="ASSESSMENT_OUTCOME — unified topic carrying all routing decisions (release / retain / investigate) with the consolidated risk score and confidence.">
+                      <ScoreBadges green={ev.release_event} amber={ev.investigate_event} red={ev.retain_event} />
+                    </BrokerNode>
+                  </div>
+                </>
+              )
+            })()}
 
             {/* ── Right side: balanced two-row layout ────────────── */}
             {(() => {
-              // Right-side row heights — decoupled from the left-side zone heights
-              // so C&T and Exit Process get equal visual weight.
-              const midY   = (yOV + yRT) / 2           // horizontal axis of the main flow
-              const rRowH  = 140                        // each right-side row
-              const rGap   = 16
+              // Right-side row heights — decoupled from left-side zone heights.
+              // Positioned with paddingTop so they align exactly with the fan-out
+              // target Ys (no flexbox centering mismatch).
+              const midY    = yRT
+              const rRowH   = 120
+              const rGap    = 20
               const rTotalH = rRowH * 2 + rGap
-              const rTopY  = midY - rTotalH / 2 + rRowH / 2
-              const rBotY  = midY + rTotalH / 2 - rRowH / 2
+              const rTopPad = midY - rTotalH / 2            // padding from container top to first row
+              const rTopY   = rTopPad + rRowH / 2           // center of top row
+              const rBotY   = rTopPad + rRowH + rGap + rRowH / 2  // center of bottom row
+
+              const colStyle = { height: ROW1_H, paddingTop: rTopPad, boxSizing: 'border-box' }
               return (
                 <>
-                  {/* Fan-out: Assessment Outcome → C&T (top) + Exit Process (bottom) */}
                   <FanOutSVG height={ROW1_H} targetYs={[rTopY, rBotY]} width={48} />
 
-                  {/* Subscribers: C&T Risk Management (top) + Exit Process Factory (bottom) */}
-                  <div style={{ height: ROW1_H, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+                  <div style={colStyle}>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: rGap }}>
-                      <div style={{ height: rRowH, display: 'flex', alignItems: 'center' }}>
+                      <div style={{ height: rRowH, display: 'flex', alignItems: 'center', gap: 0 }}>
                         <div ref={ctRef}><FactoryNode icon="🏛️" label="C&T Risk Management" description="acts on investigate"
-                          width={210}
+                          width={200}
                           tooltip="Custom & Tax Risk Management System — subscribes to Assessment Outcome (investigate route only). Opens cases in investigation.db and produces Investigation Outcome events on closure." /></div>
-                      </div>
-                      <div style={{ height: rRowH, display: 'flex', alignItems: 'center' }}>
-                        <div ref={dbStoreRef}><FactoryNode icon="🚪" label="Exit Process Factory" description="emits CUSTOM_OUTCOME" sm
-                          tooltip="Exit Process Factory — subscribes to Assessment Outcome (release + retain routes) and Investigation Outcome. Emits a single terminal CUSTOM_OUTCOME event per completed order." /></div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Arrows: subscribers → output */}
-                  <div style={{ height: ROW1_H, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: rGap }}>
-                      <div style={{ height: rRowH, display: 'flex', alignItems: 'center' }}><Arrow /></div>
-                      <div style={{ height: rRowH, display: 'flex', alignItems: 'center' }}><Arrow /></div>
-                    </div>
-                  </div>
-
-                  {/* Output: Investigation Outcome (top) + Custom Outcome (bottom) */}
-                  <div style={{ height: ROW1_H, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: rGap }}>
-                      <div style={{ height: rRowH, display: 'flex', alignItems: 'center' }}>
+                        <LongArrow width={60} />
                         <div ref={invOutcomeRef}><BrokerNode label="Investigation Outcome" topicKey="INVESTIGATION_OUTCOME"
                           count={ev.investigation_outcome || 0} sm width={OUT_BROKER_W}
                           tooltip="INVESTIGATION_OUTCOME — produced by the C&T Risk Management system on case closure. Consumed by the Exit Process Factory." /></div>
                       </div>
-                      <div ref={dbHubRef} style={{ height: rRowH, display: 'flex', alignItems: 'center' }}>
-                        <BrokerNode label="Custom Outcome" topicKey="CUSTOM_OUTCOME" sm width={OUT_BROKER_W}
-                          count={customTotal}
-                          tooltip={`Terminal CUSTOM_OUTCOME broker — ${customTotal} events.`}>
-                          <CustomOutcomeBreakdown s={customStatus} />
-                        </BrokerNode>
+                      <div style={{ height: rRowH, display: 'flex', alignItems: 'center', gap: 0 }}>
+                        <div ref={dbStoreRef}><FactoryNode icon="🚪" label="Exit Process Factory" description="emits CUSTOM_OUTCOME" sm
+                          tooltip="Exit Process Factory — subscribes to Assessment Outcome (release + retain routes) and Investigation Outcome. Emits a single terminal CUSTOM_OUTCOME event per completed order." /></div>
+                        {/* Stretchy arrow: flex-grows so Custom Outcome aligns with Investigation Outcome above */}
+                        <div style={{ flex: 1, display: 'flex', alignItems: 'center', minWidth: 60 }}>
+                          <div style={{ flex: 1, height: 2, background: '#adb5bd' }} />
+                          <div style={{ width: 0, height: 0, borderTop: '4px solid transparent', borderBottom: '4px solid transparent', borderLeft: '6px solid #adb5bd', flex: '0 0 auto' }} />
+                        </div>
+                        <div ref={dbHubRef}>
+                          <BrokerNode label="Custom Outcome" topicKey="CUSTOM_OUTCOME" sm width={OUT_BROKER_W}
+                            count={customTotal}
+                            tooltip={`Terminal CUSTOM_OUTCOME broker — ${customTotal} events.`}>
+                            <CustomOutcomeBreakdown s={customStatus} />
+                          </BrokerNode>
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -1400,7 +1393,7 @@ function PipelineDiagram({ pipeline }) {
             {overlayPaths && (() => {
               const grey = '#adb5bd'
               const topRunwayY = 4                                        // just inside the top edge
-              const bottomRunwayY = overlayPaths.containerH + 14          // below all content (overflow: visible)
+              const bottomRunwayY = overlayPaths.containerH + 25          // below all content including MS zone
               // Single exit point: right edge of Entry, vertically centred
               const startX = overlayPaths.ex
               const startY = overlayPaths.ey
@@ -1447,7 +1440,7 @@ function PipelineDiagram({ pipeline }) {
                       <polyline
                         points={`${startX},${startY} ${startX},${bottomRunwayY} ${overlayPaths.dbx},${bottomRunwayY} ${overlayPaths.dbx},${overlayPaths.dby}`}
                         stroke={grey} strokeWidth="1.5" fill="none" />
-                      <polygon points={`${overlayPaths.dbx - 4},${overlayPaths.dby - 6} ${overlayPaths.dbx + 4},${overlayPaths.dby - 6} ${overlayPaths.dbx},${overlayPaths.dby}`}
+                      <polygon points={`${overlayPaths.dbx - 4},${overlayPaths.dby + 6} ${overlayPaths.dbx + 4},${overlayPaths.dby + 6} ${overlayPaths.dbx},${overlayPaths.dby}`}
                                fill={grey} />
                       <text x={(startX + overlayPaths.dbx) / 2} y={bottomRunwayY - 4}
                             textAnchor="middle" fontSize="8" fill={grey} fontWeight="600">
