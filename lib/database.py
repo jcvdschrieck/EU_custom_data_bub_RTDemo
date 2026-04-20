@@ -350,6 +350,9 @@ CREATE TABLE IF NOT EXISTS Sales_Order_Case (
     Update_time                      TEXT,
     Updated_by                       TEXT,
     Created_time                     TEXT,
+    -- Case-level overall risk score (0-1, averaged across all orders)
+    Overall_Case_Risk_Score          REAL DEFAULT 0,
+    Overall_Case_Risk_Level          TEXT DEFAULT 'Low',
     -- Per-engine risk scores (0-1 average across all orders in the case)
     Engine_VAT_Ratio                 REAL DEFAULT 0,
     Engine_ML_Watchlist              REAL DEFAULT 0,
@@ -477,6 +480,8 @@ def init_investigation_db() -> None:
         for table, col, definition in [
             ("Sales_Order_Case", "Created_time",              "TEXT"),
             ("Sales_Order",      "Case_ID",                   "TEXT"),
+            ("Sales_Order_Case", "Overall_Case_Risk_Score",   "REAL DEFAULT 0"),
+            ("Sales_Order_Case", "Overall_Case_Risk_Level",   "TEXT DEFAULT 'Low'"),
             ("Sales_Order_Case", "Engine_VAT_Ratio",          "REAL DEFAULT 0"),
             ("Sales_Order_Case", "Engine_ML_Watchlist",       "REAL DEFAULT 0"),
             ("Sales_Order_Case", "Engine_IE_Seller_Watchlist", "REAL DEFAULT 0"),
@@ -1445,21 +1450,25 @@ def append_order_to_case(case_id: str, so_row: dict, sor_row: dict) -> None:
         conn.close()
 
 
-def update_case_engine_scores(case_id: str, engine_scores: dict) -> None:
-    """Update the per-engine risk scores on a case. Called on case creation
-    and when re-averaging after a new order is appended.
-    engine_scores: {Engine_VAT_Ratio, Engine_ML_Watchlist, ...}"""
+def update_case_engine_scores(case_id: str, engine_scores: dict,
+                              overall_score: float, risk_level: str) -> None:
+    """Update the per-engine and overall risk scores on a case."""
     conn = _connect(INVESTIGATION_DB)
     with conn:
         conn.execute("""
             UPDATE Sales_Order_Case SET
-                Engine_VAT_Ratio             = :Engine_VAT_Ratio,
-                Engine_ML_Watchlist           = :Engine_ML_Watchlist,
-                Engine_IE_Seller_Watchlist    = :Engine_IE_Seller_Watchlist,
-                Engine_Description_Vagueness  = :Engine_Description_Vagueness,
-                Update_time                   = :Update_time
+                Overall_Case_Risk_Score       = :Overall_Case_Risk_Score,
+                Overall_Case_Risk_Level       = :Overall_Case_Risk_Level,
+                Engine_VAT_Ratio              = :Engine_VAT_Ratio,
+                Engine_ML_Watchlist            = :Engine_ML_Watchlist,
+                Engine_IE_Seller_Watchlist     = :Engine_IE_Seller_Watchlist,
+                Engine_Description_Vagueness   = :Engine_Description_Vagueness,
+                Update_time                    = :Update_time
             WHERE Case_ID = :Case_ID
-        """, {**engine_scores, "Case_ID": case_id,
+        """, {**engine_scores,
+              "Overall_Case_Risk_Score": overall_score,
+              "Overall_Case_Risk_Level": risk_level,
+              "Case_ID": case_id,
               "Update_time": datetime.now(timezone.utc).isoformat()})
     conn.close()
 
@@ -1596,6 +1605,7 @@ def upsert_investigation_set(so_row: dict, sor_row: dict, soc_row: dict) -> None
                     Proposed_Action_Tax, Proposed_Action_Customs,
                     Communication, Additional_Evidence,
                     Update_time, Updated_by, Created_time,
+                    Overall_Case_Risk_Score, Overall_Case_Risk_Level,
                     Engine_VAT_Ratio, Engine_ML_Watchlist,
                     Engine_IE_Seller_Watchlist, Engine_Description_Vagueness
                 ) VALUES (
@@ -1607,6 +1617,7 @@ def upsert_investigation_set(so_row: dict, sor_row: dict, soc_row: dict) -> None
                     :Proposed_Action_Tax, :Proposed_Action_Customs,
                     :Communication, :Additional_Evidence,
                     :Update_time, :Updated_by, :Created_time,
+                    :Overall_Case_Risk_Score, :Overall_Case_Risk_Level,
                     :Engine_VAT_Ratio, :Engine_ML_Watchlist,
                     :Engine_IE_Seller_Watchlist, :Engine_Description_Vagueness
                 )

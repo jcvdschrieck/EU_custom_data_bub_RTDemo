@@ -610,6 +610,28 @@ THRESHOLD_RELEASE    = 1.0 / 3.0   # < 33.33% → release
 THRESHOLD_RETAIN     = 2.0 / 3.0   # > 66.66% → retain
 ASSESSMENT_TIMER_S   = 3.0         # seconds after validation before forced publish
 
+
+def case_risk_level(score: float) -> str:
+    """Compute Low/Medium/High for a case-level risk score.
+
+    Only investigate-routed transactions (score in [THRESHOLD_RELEASE,
+    THRESHOLD_RETAIN]) become cases. The Low/Medium/High classification
+    maps the score within that interval using the same 1/3 and 2/3
+    percentile boundaries, so the labels adapt if the thresholds change.
+
+      Low:    score < THRESHOLD_RELEASE + interval × 1/3
+      Medium: score < THRESHOLD_RELEASE + interval × 2/3
+      High:   score >= THRESHOLD_RELEASE + interval × 2/3
+    """
+    interval = THRESHOLD_RETAIN - THRESHOLD_RELEASE
+    low_high_boundary = THRESHOLD_RELEASE + interval * (1.0 / 3.0)
+    medium_high_boundary = THRESHOLD_RELEASE + interval * (2.0 / 3.0)
+    if score >= medium_high_boundary:
+        return "High"
+    if score >= low_high_boundary:
+        return "Medium"
+    return "Low"
+
 async def _release_factory() -> None:
     """Automated Assessment Factory.
 
@@ -854,6 +876,9 @@ async def _ct_risk_management_factory() -> None:
                 now_iso = datetime.now(timezone.utc).isoformat()
                 bk = msg.get("Sales_Order_Business_Key", "")
 
+                # Per-order overall risk score (0-1) from the assessment
+                order_risk_score = float(msg.get("Overall_Risk_Score") or 0)
+
                 # Extract per-engine risk scores (0-1)
                 eo = msg.get("engine_outcomes", {}) or {}
                 eng_scores = {
@@ -923,7 +948,7 @@ async def _ct_risk_management_factory() -> None:
                 if existing:
                     existing_case_id = existing["Case_ID"]
                     append_order_to_case(existing_case_id, so_row, sor_row)
-                    # Recompute average engine scores across all orders
+                    # Recompute averages across all orders in the case
                     n = get_case_transaction_count(existing_case_id)
                     old = get_case_hydrated(existing_case_id) or {}
                     avg = {}
@@ -932,7 +957,12 @@ async def _ct_risk_management_factory() -> None:
                         old_val = float(old.get(field) or 0)
                         new_val = eng_scores[field]
                         avg[field] = ((old_val * (n - 1)) + new_val) / n if n > 0 else new_val
-                    update_case_engine_scores(existing_case_id, avg)
+                    old_overall = float(old.get("Overall_Case_Risk_Score") or 0)
+                    new_overall = ((old_overall * (n - 1)) + order_risk_score) / n if n > 0 else order_risk_score
+                    update_case_engine_scores(
+                        existing_case_id, avg,
+                        overall_score=new_overall,
+                        risk_level=case_risk_level(new_overall))
                     hydrated = get_case_hydrated(existing_case_id)
                     _push_rg_case_sse({"event": "case_updated", "action": "tx_appended", "case": hydrated})
                 else:
@@ -958,6 +988,8 @@ async def _ct_risk_management_factory() -> None:
                         "Update_time":                      now_iso,
                         "Updated_by":                       "system",
                         "Created_time":                     now_iso,
+                        "Overall_Case_Risk_Score":          order_risk_score,
+                        "Overall_Case_Risk_Level":          case_risk_level(order_risk_score),
                         **eng_scores,
                     }
                     upsert_investigation_set(so_row, sor_row, soc_row)
@@ -1365,6 +1397,10 @@ def api_reference():
         "sales_order_statuses":  get_sales_order_statuses(),
         "case_statuses":         get_case_statuses(),
         "risk_engine_signals":   get_risk_engine_signals(),
+        "risk_thresholds": {
+            "release": round(THRESHOLD_RELEASE, 4),
+            "retain":  round(THRESHOLD_RETAIN, 4),
+        },
     }
 
 
