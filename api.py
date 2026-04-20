@@ -845,109 +845,108 @@ async def _ct_risk_management_factory() -> None:
             msg = await q.get()
             route = msg.get("route")
             if route != "investigate":
-                # Clean up the tx buffer for non-investigate routes
                 _tx_buffer.pop(msg.get("order_id", ""), None)
                 continue
+            try:
+                order_id = msg.get("order_id", "")
+                tx = _tx_buffer.pop(order_id, None) or {}
+                now_iso = datetime.now(timezone.utc).isoformat()
+                bk = msg.get("Sales_Order_Business_Key", "")
 
-            order_id = msg.get("order_id", "")
-            tx = _tx_buffer.pop(order_id, None) or {}
+                # Derive VAT problem type from engine outcomes
+                eo = msg.get("engine_outcomes", {}) or {}
+                vat_flagged = eo.get("vat_ratio", {}).get("risk", 0) >= 0.5
+                wl_flagged  = eo.get("watchlist", {}).get("risk", 0) >= 0.5
+                if vat_flagged and wl_flagged:
+                    problem_type = "VAT Rate Deviation + Watchlist Match"
+                elif vat_flagged:
+                    problem_type = "VAT Rate Deviation"
+                elif wl_flagged:
+                    problem_type = "Watchlist Match"
+                else:
+                    problem_type = "Risk Pattern"
 
-            now_iso = datetime.now(timezone.utc).isoformat()
-            bk = msg.get("Sales_Order_Business_Key", "")
+                ml = eo.get("watchlist", {})
+                def _pct(v):
+                    return round(float(v) * 100, 1) if v is not None else None
 
-            # Derive VAT problem type from engine outcomes
-            eo = msg.get("engine_outcomes", {}) or {}
-            vat_flagged = eo.get("vat_ratio", {}).get("risk", 0) >= 0.5
-            wl_flagged  = eo.get("watchlist", {}).get("risk", 0) >= 0.5
-            if vat_flagged and wl_flagged:
-                problem_type = "VAT Rate Deviation + Watchlist Match"
-            elif vat_flagged:
-                problem_type = "VAT Rate Deviation"
-            elif wl_flagged:
-                problem_type = "Watchlist Match"
-            else:
-                problem_type = "Risk Pattern"
-
-            # Extract per-dimension scores from the ML watchlist engine
-            ml = eo.get("watchlist", {})
-            def _pct(v):
-                return round(float(v) * 100, 1) if v is not None else None
-
-            # ── Build Sales_Order row from the buffered tx ──
-            so_row = {
-                "Sales_Order_ID":           order_id,
-                "Sales_Order_Business_Key": bk,
-                "HS_Product_Category":      tx.get("item_category"),
-                "Product_Description":      tx.get("item_description"),
-                "Product_Value":            tx.get("value"),
-                "VAT_Rate":                 tx.get("vat_rate"),
-                "VAT_Fee":                  tx.get("vat_amount"),
-                "Seller_Name":              tx.get("seller_name"),
-                "Country_Origin":           tx.get("seller_country"),
-                "Country_Destination":      tx.get("buyer_country"),
-                "Status":                   SO_STATUS.UNDER_INVESTIGATION,
-                "Update_time":              now_iso,
-                "Updated_by":               "system",
-            }
-            sor_row = {
-                "Sales_Order_Risk_ID":         msg.get("Sales_Order_Risk_ID"),
-                "Sales_Order_Business_Key":    bk,
-                "Risk_Type":                   msg.get("Risk_Type", "VAT"),
-                "Overall_Risk_Score":          msg.get("Overall_Risk_Score"),
-                "Overall_Risk_Level":          msg.get("Overall_Risk_Level"),
-                "Seller_Risk_Score":           _pct(ml.get("seller_risk")),
-                "Country_Risk_Score":          _pct(ml.get("country_risk")),
-                "Product_Category_Risk_Score": _pct(ml.get("product_category_risk")),
-                "Manufacturer_Risk_Score":     _pct(ml.get("destination_risk")),
-                "Confidence_Score":            msg.get("Confidence_Score"),
-                "Overall_Risk_Description":    ml.get("description"),
-                "Proposed_Risk_Action":        msg.get("Proposed_Risk_Action"),
-                "Update_time":                 now_iso,
-                "Updated_by":                  "system",
-            }
-
-            existing = find_similar_open_case(
-                seller      = tx.get("seller_name", ""),
-                destination = tx.get("buyer_country", ""),
-                category    = tx.get("item_category", ""),
-                description = tx.get("item_description", ""),
-            )
-
-            if existing:
-                existing_case_id = existing["Case_ID"]
-                append_order_to_case(existing_case_id, so_row, sor_row)
-                hydrated = get_case_hydrated(existing_case_id)
-                _push_rg_case_sse({"event": "case_updated", "action": "tx_appended", "case": hydrated})
-            else:
-                case_id = f"CASE-{_uuid.uuid4().hex[:12].upper()}"
-                so_row["Case_ID"] = case_id
-
-                soc_row = {
-                    "Case_ID":                          case_id,
-                    "Sales_Order_Business_Key":         bk,
-                    "Status":                           STATUS.NEW,
-                    "VAT_Problem_Type":                 problem_type,
-                    "Recommended_Product_Value":        None,
-                    "Recommended_VAT_Product_Category": None,
-                    "Recommended_VAT_Rate":             None,
-                    "Recommended_VAT_Fee":              None,
-                    "AI_Analysis":                      None,
-                    "AI_Confidence":                    None,
-                    "VAT_Gap_Fee":                      None,
-                    "Evaluation_by":                    None,
-                    "Proposed_Action_Tax":              None,
-                    "Proposed_Action_Customs":          None,
-                    "Communication":                    "[]",
-                    "Additional_Evidence":              None,
-                    "Update_time":                      now_iso,
-                    "Updated_by":                       "system",
-                    "Created_time":                     now_iso,
+                so_row = {
+                    "Sales_Order_ID":           order_id,
+                    "Sales_Order_Business_Key": bk,
+                    "HS_Product_Category":      tx.get("item_category"),
+                    "Product_Description":      tx.get("item_description"),
+                    "Product_Value":            tx.get("value"),
+                    "VAT_Rate":                 tx.get("vat_rate"),
+                    "VAT_Fee":                  tx.get("vat_amount"),
+                    "Seller_Name":              tx.get("seller_name"),
+                    "Country_Origin":           tx.get("seller_country"),
+                    "Country_Destination":      tx.get("buyer_country"),
+                    "Status":                   SO_STATUS.UNDER_INVESTIGATION,
+                    "Update_time":              now_iso,
+                    "Updated_by":               "system",
+                }
+                sor_row = {
+                    "Sales_Order_Risk_ID":         msg.get("Sales_Order_Risk_ID"),
+                    "Sales_Order_Business_Key":    bk,
+                    "Risk_Type":                   msg.get("Risk_Type", "VAT"),
+                    "Overall_Risk_Score":          msg.get("Overall_Risk_Score"),
+                    "Overall_Risk_Level":          msg.get("Overall_Risk_Level"),
+                    "Seller_Risk_Score":           _pct(ml.get("seller_risk")),
+                    "Country_Risk_Score":          _pct(ml.get("country_risk")),
+                    "Product_Category_Risk_Score": _pct(ml.get("product_category_risk")),
+                    "Manufacturer_Risk_Score":     _pct(ml.get("destination_risk")),
+                    "Confidence_Score":            msg.get("Confidence_Score"),
+                    "Overall_Risk_Description":    ml.get("description"),
+                    "Proposed_Risk_Action":        msg.get("Proposed_Risk_Action"),
+                    "Risk_Comment":                None,
+                    "Evaluation_by":               None,
+                    "Update_time":                 now_iso,
+                    "Updated_by":                  "system",
                 }
 
-                upsert_investigation_set(so_row, sor_row, soc_row)
+                existing = find_similar_open_case(
+                    seller      = tx.get("seller_name", ""),
+                    destination = tx.get("buyer_country", ""),
+                    category    = tx.get("item_category", ""),
+                    description = tx.get("item_description", ""),
+                )
 
-                hydrated = get_case_hydrated(case_id) or {"Case_ID": case_id}
-                _push_rg_case_sse({"event": "new_case", "case": hydrated})
+                if existing:
+                    existing_case_id = existing["Case_ID"]
+                    append_order_to_case(existing_case_id, so_row, sor_row)
+                    hydrated = get_case_hydrated(existing_case_id)
+                    _push_rg_case_sse({"event": "case_updated", "action": "tx_appended", "case": hydrated})
+                else:
+                    case_id = f"CASE-{_uuid.uuid4().hex[:12].upper()}"
+                    so_row["Case_ID"] = case_id
+                    soc_row = {
+                        "Case_ID":                          case_id,
+                        "Sales_Order_Business_Key":         bk,
+                        "Status":                           STATUS.NEW,
+                        "VAT_Problem_Type":                 problem_type,
+                        "Recommended_Product_Value":        None,
+                        "Recommended_VAT_Product_Category": None,
+                        "Recommended_VAT_Rate":             None,
+                        "Recommended_VAT_Fee":              None,
+                        "AI_Analysis":                      None,
+                        "AI_Confidence":                    None,
+                        "VAT_Gap_Fee":                      None,
+                        "Evaluation_by":                    None,
+                        "Proposed_Action_Tax":              None,
+                        "Proposed_Action_Customs":          None,
+                        "Communication":                    "[]",
+                        "Additional_Evidence":              None,
+                        "Update_time":                      now_iso,
+                        "Updated_by":                       "system",
+                        "Created_time":                     now_iso,
+                    }
+                    upsert_investigation_set(so_row, sor_row, soc_row)
+                    hydrated = get_case_hydrated(case_id) or {"Case_ID": case_id}
+                    _push_rg_case_sse({"event": "new_case", "case": hydrated})
+                    print(f"  [C&T] case {case_id} created for {tx.get('seller_name','?')}")
+            except Exception as e:
+                print(f"  [C&T] ERROR processing assessment: {e}")
+                import traceback; traceback.print_exc()
 
     await asyncio.gather(_drain_tx(), _drain_assessment())
 
@@ -1839,6 +1838,16 @@ if _ireland_app_dir.exists():
               name="ireland_app")
 
 
+@app.get("/api/debug/queues")
+def debug_queues():
+    from lib.broker import broker as _b
+    result = {}
+    for topic, queues in _b._queues.items():
+        if queues:
+            result[topic] = [q.qsize() for q in queues]
+    return result
+
+
 # ── Main frontend (must be absolutely last) ───────────────────────────────────
 # Serves the Vite build.  Static assets (JS/CSS) are served directly;
 # all other GET requests fall back to index.html for client-side routing.
@@ -1857,3 +1866,4 @@ if _frontend_dist.exists():
         if candidate.is_file():
             return _FileResponse(str(candidate))
         return _FileResponse(str(_frontend_dist / "index.html"))
+
