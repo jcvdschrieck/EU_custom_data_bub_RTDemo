@@ -1041,6 +1041,10 @@ async def lifespan(app: FastAPI):
     #   AMBER → INVESTIGATE_EVENT → _tax_listener     → _tax_queue
     asyncio.create_task(_ct_risk_management_factory())
     asyncio.create_task(_db_store_worker())
+
+    # Note: broker queues are NOT drained on startup — the factories need
+    # their subscriber queues intact. Queue depths are masked in the UI
+    # (show_queues=False) when the simulation hasn't started yet.
     # _data_hub_writer removed — DB Store Factory now writes directly
     # to the new data model tables (Sales_Order + Sales_Order_Risk)
     asyncio.create_task(_sim_state_broadcaster())
@@ -1138,9 +1142,10 @@ def _compute_sim_state_snapshot() -> dict:
         CUSTOM_OUTCOME,
         RELEASE_EVENT, RETAIN_EVENT, INVESTIGATE_EVENT,
     ]
+    show_queues = state.fired_count > 0 or state.running
     pipeline = {
         "events":             {t: event_count(t) for t in topics},
-        "queues":             {t: _broker.qsize(t) for t in topics},
+        "queues":             {t: (_broker.qsize(t) if show_queues else 0) for t in topics},
         "stored_count":       get_transaction_count(),
         "risk_flags": {
             "rt_risk_1_flagged": count_field_value(RT_RISK_1_OUTCOME, "outcome.flagged", True),
@@ -1689,9 +1694,13 @@ def sim_pipeline():
         CUSTOM_OUTCOME,
         RELEASE_EVENT, RETAIN_EVENT, INVESTIGATE_EVENT,
     ]
+    # Show queue depths only when simulation has fired events; otherwise
+    # report 0 so stale factory-internal buffers don't confuse the UI.
+    show_queues = state.fired_count > 0 or state.running
+    queues = {t: (_broker.qsize(t) if show_queues else 0) for t in topics}
     return {
         "events":             {t: event_count(t) for t in topics},
-        "queues":             {t: _broker.qsize(t) for t in topics},
+        "queues":             queues,
         "stored_count":       get_transaction_count(),
         "risk_flags": {
             "rt_risk_1_flagged": count_field_value(RT_RISK_1_OUTCOME, "outcome.flagged", True),
@@ -1781,6 +1790,10 @@ def sim_reset():
     reset_cases()           # clear investigation cases
     _push_rg_case_sse({"event": "cases_reset"})  # notify Revenue Guardian clients
     flush_events()
+    from lib.broker import broker as _b
+    drained = _b.drain_all()
+    if drained:
+        print(f"  [reset] drained {drained} stale messages from broker queues")
     # Re-seed historical data if it was wiped (e.g. first run or manual DB delete)
     if historical_transaction_count() == 0:
         seed_european_custom_db()

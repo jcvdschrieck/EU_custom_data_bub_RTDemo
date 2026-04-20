@@ -105,6 +105,21 @@ class MessageBroker:
         """Total pending messages across all subscriber queues for *topic*."""
         return sum(q.qsize() for q in self._queues[topic])
 
+    def drain_all(self) -> int:
+        """Empty every subscriber queue across all topics. Returns total
+        messages drained. Called on simulation reset so stale messages
+        from cancelled factory tasks don't linger."""
+        total = 0
+        for topic_queues in self._queues.values():
+            for q in topic_queues:
+                while not q.empty():
+                    try:
+                        q.get_nowait()
+                        total += 1
+                    except asyncio.QueueEmpty:
+                        break
+        return total
+
 
 # ── Topic name constants ──────────────────────────────────────────────────────
 
