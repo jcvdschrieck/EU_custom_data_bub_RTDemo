@@ -7,10 +7,13 @@ function fmt(n, dec = 2) {
 }
 
 const VERDICT = {
-  incorrect: { icon: '❌', color: 'var(--error)',   bg: '#fff0f0', label: 'INCORRECT' },
-  correct:   { icon: '✅', color: 'var(--success)', bg: '#f0fff4', label: 'CORRECT'   },
-  uncertain: { icon: '❓', color: '#856404',        bg: '#fffbe6', label: 'UNCERTAIN'  },
-  processing:{ icon: '⚙️', color: '#005ea2',        bg: '#e8f1f8', label: 'PROCESSING' },
+  incorrect:  { icon: '❌', color: 'var(--error)',   bg: '#fff0f0', label: 'INCORRECT'  },
+  suspicious: { icon: '🔴', color: 'var(--error)',   bg: '#fff0f0', label: 'SUSPICIOUS' },
+  correct:    { icon: '✅', color: 'var(--success)', bg: '#f0fff4', label: 'CORRECT'    },
+  legitimate: { icon: '✅', color: 'var(--success)', bg: '#f0fff4', label: 'LEGITIMATE' },
+  uncertain:  { icon: '❓', color: '#856404',        bg: '#fffbe6', label: 'UNCERTAIN'  },
+  processing: { icon: '⚙️', color: '#005ea2',        bg: '#e8f1f8', label: 'PROCESSING' },
+  queued:     { icon: '📥', color: '#666',           bg: '#f5f5f5', label: 'QUEUED'     },
 }
 
 // ── Detail drawer ─────────────────────────────────────────────────────────────
@@ -162,18 +165,23 @@ const DARK_TEXT = '#1a1a2e'
 // ── Console log line ──────────────────────────────────────────────────────────
 
 function LogLine({ entry, onDetails }) {
-  const isProcessing = entry.type === 'processing'
-  const v = VERDICT[isProcessing ? 'processing' : entry.verdict] || VERDICT.uncertain
+  const isProcessing = entry.verdict === 'processing' || entry.type === 'processing'
+  const isQueued = entry.verdict === 'queued'
+  const v = VERDICT[entry.verdict] || VERDICT.uncertain
 
-  const ts = isProcessing
-    ? entry.started_at?.slice(11, 19)
-    : entry.processed_at?.slice(11, 19)
+  const ts = entry.processed_at?.slice(11, 19) || entry.started_at?.slice(11, 19)
 
-  const msg = isProcessing
-    ? `Processing transaction ${entry.transaction_id?.slice(-8).toUpperCase()} · ${entry.seller_name} — ${entry.item_description} · €${fmt(entry.value)} · VAT ${(entry.vat_rate * 100).toFixed(1)}%`
-    : entry.verdict === 'incorrect'
-      ? `Transaction ${entry.transaction_id?.slice(-8).toUpperCase()} · verdict: INCORRECT — ${(entry.vat_rate * 100).toFixed(1)}% applied, ${(entry.correct_vat_rate * 100).toFixed(1)}% expected · forwarded to Ireland Revenue queue`
-      : `Transaction ${entry.transaction_id?.slice(-8).toUpperCase()} · verdict: ${entry.verdict?.toUpperCase()} — ${entry.seller_name} · suspicious flag cleared`
+  const caseLabel = entry.transaction_id?.startsWith('CASE-')
+    ? `Case ${entry.transaction_id.slice(5, 17)}`
+    : `Tx ${entry.transaction_id?.slice(-8).toUpperCase()}`
+
+  const msg = isQueued
+    ? `${caseLabel} enqueued for AI analysis` + (entry.seller_name ? ` · ${entry.seller_name}` : '')
+    : isProcessing
+    ? `${caseLabel} · processing · ${entry.seller_name || '?'} — ${entry.item_description || '?'} · ${entry.buyer_country || '?'}`
+    : entry.verdict === 'incorrect' || entry.verdict === 'suspicious'
+      ? `${caseLabel} · verdict: ${entry.verdict.toUpperCase()} — ${entry.seller_name} · ${entry.reasoning?.slice(0, 80) || ''}`
+      : `${caseLabel} · verdict: ${(entry.verdict || 'unknown').toUpperCase()} — ${entry.seller_name || ''} · ${entry.reasoning?.slice(0, 60) || ''}`
 
   return (
     <div style={{
@@ -202,7 +210,7 @@ function LogLine({ entry, onDetails }) {
       </span>
 
       {/* Details button */}
-      {!isProcessing && (
+      {!isProcessing && !isQueued && (
         <button onClick={() => onDetails(entry)} style={{
           background: 'none', border: '1px solid var(--border)',
           borderRadius: 4, padding: '2px 8px', cursor: 'pointer',
@@ -239,11 +247,13 @@ export default function ProcessingLogPage() {
       const chronological = [...logData].reverse()
       setLog(chronological)
 
-      const total     = logData.length
-      const incorrect = logData.filter(r => r.verdict === 'incorrect').length
-      const correct   = logData.filter(r => r.verdict === 'correct').length
-      const uncertain = logData.filter(r => r.verdict === 'uncertain').length
-      setStats({ total, incorrect, correct, uncertain })
+      const total      = logData.length
+      const suspicious = logData.filter(r => r.verdict === 'incorrect' || r.verdict === 'suspicious').length
+      const cleared    = logData.filter(r => r.verdict === 'correct' || r.verdict === 'legitimate').length
+      const uncertain  = logData.filter(r => r.verdict === 'uncertain').length
+      const queued     = logData.filter(r => r.verdict === 'queued').length
+      const processing = logData.filter(r => r.verdict === 'processing').length
+      setStats({ total, suspicious, cleared, uncertain, queued, processing })
     } catch { /* ignore */ }
   }, [])
 
@@ -274,10 +284,11 @@ export default function ProcessingLogPage() {
       {stats && (
         <div className="metrics-row" style={{ marginBottom: 16 }}>
           {[
-            { label: 'Total processed', value: stats.total,     sub: 'by agent' },
-            { label: 'Incorrect',       value: stats.incorrect, sub: '→ Ireland queue', cls: stats.incorrect ? 'error-tile' : '' },
-            { label: 'Correct',         value: stats.correct,   sub: 'cleared' },
-            { label: 'Uncertain',       value: stats.uncertain, sub: 'cleared' },
+            { label: 'Total entries',   value: stats.total,      sub: 'all events' },
+            { label: 'Suspicious',      value: stats.suspicious, sub: '→ flagged',   cls: stats.suspicious ? 'error-tile' : '' },
+            { label: 'Cleared',         value: stats.cleared,    sub: 'no risk' },
+            { label: 'Uncertain',       value: stats.uncertain,  sub: 'inconclusive' },
+            { label: 'In queue',        value: stats.queued + stats.processing, sub: 'pending' },
           ].map(t => (
             <div key={t.label} className={`metric-tile ${t.cls || ''}`}>
               <div className="metric-tile__label">{t.label}</div>

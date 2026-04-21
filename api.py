@@ -1485,6 +1485,15 @@ async def _enqueue_for_agent(case_id: str) -> None:
     if _agent_queue is None:
         return
     await _agent_queue.put(case_id)
+    insert_agent_log({
+        "transaction_id": case_id, "seller_name": None,
+        "buyer_country": None, "item_description": None,
+        "item_category": None, "value": None,
+        "vat_rate": None, "correct_vat_rate": None,
+        "verdict": "queued", "reasoning": "Case enqueued for AI agent analysis",
+        "legislation_refs": "[]", "sent_to_ireland": 0,
+        "processed_at": datetime.now(timezone.utc).isoformat(),
+    })
 
 
 def _build_agent_tx(case: dict) -> dict:
@@ -1522,6 +1531,22 @@ async def _agent_worker() -> None:
             if not case:
                 continue
 
+            tx = _build_agent_tx(case)
+            insert_agent_log({
+                "transaction_id": case_id,
+                "seller_name": tx.get("seller_name"),
+                "buyer_country": tx.get("buyer_country"),
+                "item_description": tx.get("item_description"),
+                "item_category": tx.get("item_category"),
+                "value": tx.get("value"),
+                "vat_rate": tx.get("vat_rate"),
+                "correct_vat_rate": None,
+                "verdict": "processing",
+                "reasoning": f"Agent started analysing case {case_id}",
+                "legislation_refs": "[]", "sent_to_ireland": 0,
+                "processed_at": datetime.now(timezone.utc).isoformat(),
+            })
+
             destination = (case.get("Country_Destination") or "").upper()
             if destination == "IE":
                 tx = _build_agent_tx(case)
@@ -1554,13 +1579,26 @@ async def _agent_worker() -> None:
             update_case(case_id, {
                 "Status":        STATUS.UNDER_REVIEW_BY_TAX,
                 "AI_Analysis":   f"[{verdict}] {reasoning}",
-                # AI_Confidence intentionally left null — agent does not
-                # currently emit a numeric confidence value.
                 "Update_time":   now_iso,
                 "Updated_by":    "VAT Fraud Detection Agent",
                 "Communication": comm,
             })
             _emit_case_updated_sse(case_id, "ai_complete")
+            insert_agent_log({
+                "transaction_id": case_id,
+                "seller_name": tx.get("seller_name"),
+                "buyer_country": tx.get("buyer_country"),
+                "item_description": tx.get("item_description"),
+                "item_category": tx.get("item_category"),
+                "value": tx.get("value"),
+                "vat_rate": tx.get("vat_rate"),
+                "correct_vat_rate": None,
+                "verdict": verdict,
+                "reasoning": reasoning,
+                "legislation_refs": _json.dumps(result.get("legislation_refs", [])) if isinstance(result, dict) else "[]",
+                "sent_to_ireland": 1 if verdict == "incorrect" or verdict == "suspicious" else 0,
+                "processed_at": now_iso,
+            })
         except Exception as e:
             # Don't crash the worker on a single bad case
             try:
