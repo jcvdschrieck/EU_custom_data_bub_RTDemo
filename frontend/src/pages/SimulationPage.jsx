@@ -898,11 +898,11 @@ function MiddleSection({ ev, rf, customs, tax, taxRunning, stored, newStored, H,
           tooltip="Customs Queue — in-memory dict of transactions awaiting Customs officer action (release, retain, or escalate to Tax). Depth includes Tax-recommended items returned for the final Customs decision." />
       </div>
 
-      {/* Customs Officer console — Revenue Guardian Customs page on :8080 */}
+      {/* Customs Officer console — C&T Risk Management System Customs page on :8080 */}
       <div style={{ position: 'absolute', top: CUSTOMS_ROW_TOP, left: OFCR_LEFT, width: OFCR_W }}>
-        <FactoryNode icon="🛃" label="Customs Officer" description="@ revenue-guardian /customs" sm width={OFCR_W}
+        <FactoryNode icon="🛃" label="Customs Officer" description="@ C&T Risk Mgmt /customs" sm width={OFCR_W}
           accent={indigo}
-          tooltip="Customs Officer Console — Revenue Guardian Customs page on http://localhost:8080. The officer reviews each Customs queue item and either releases, retains, or escalates the case to the Tax authority for advice. Customs is master — its decision is the terminal event." />
+          tooltip="Customs Officer Console — C&T Risk Management System Customs page on http://localhost:8080. The officer reviews each Customs queue item and either releases, retains, or escalates the case to the Tax authority for advice. Customs is master — its decision is the terminal event." />
       </div>
 
       {/* ── Tax row blocks ── */}
@@ -919,11 +919,11 @@ function MiddleSection({ ev, rf, customs, tax, taxRunning, stored, newStored, H,
           tooltip="Tax Queue — in-memory dict of transactions awaiting Tax officer analysis. Includes both AMBER-routed items and items escalated from the Customs queue." />
       </div>
 
-      {/* Tax Officer console — Revenue Guardian Tax page on :8080 */}
+      {/* Tax Officer console — C&T Risk Management System Tax page on :8080 */}
       <div style={{ position: 'absolute', top: TAX_ROW_TOP, left: OFCR_LEFT, width: OFCR_W }}>
-        <FactoryNode icon="🧑‍⚖️" label="Tax Officer" description="@ revenue-guardian /tax" sm width={OFCR_W}
+        <FactoryNode icon="🧑‍⚖️" label="Tax Officer" description="@ C&T Risk Mgmt /tax" sm width={OFCR_W}
           accent={indigo}
-          tooltip="Tax Officer Console — Revenue Guardian Tax page on http://localhost:8080. The Tax officer triggers the VAT Fraud Detection Agent, then issues a release / retain RECOMMENDATION which is sent back to the Customs queue for the final decision." />
+          tooltip="Tax Officer Console — C&T Risk Management System Tax page on http://localhost:8080. The Tax officer triggers the VAT Fraud Detection Agent, then issues a release / retain RECOMMENDATION which is sent back to the Customs queue for the final decision." />
       </div>
 
       {/* VAT Fraud Detection Agent — sits BELOW the Tax Officer as a side
@@ -932,7 +932,7 @@ function MiddleSection({ ev, rf, customs, tax, taxRunning, stored, newStored, H,
       <div style={{ position: 'absolute', top: AGENT_TOP, left: AGENT_LEFT, width: AGENT_W }}>
         <FactoryNode icon="🤖" label="VAT Fraud Detection Agent" description="LM Studio · manually triggered" sm width={AGENT_W}
           count={taxRunning} countLabel="under analysis"
-          tooltip="VAT Fraud Detection Agent — runs the local LLM (LM Studio) on demand when the Tax officer clicks Run Agent in the Revenue Guardian UI. The count shows how many Tax queue items are currently being analysed (agent_status = agent_running)." />
+          tooltip="VAT Fraud Detection Agent — runs the local LLM (LM Studio) on demand when the Tax officer clicks Run Agent in the C&T Risk Management System UI. The count shows how many Tax queue items are currently being analysed (agent_status = agent_running)." />
       </div>
 
       {/* Investigation Clearance broker — vertically centered on Y_CUSTOMS.
@@ -1638,7 +1638,7 @@ export default function SimulationPage() {
 
   return (
     <div className="page-container">
-      {/* Title row — flex so the Revenue Guardian launcher can sit on the
+      {/* Title row — flex so the C&T Risk Management launcher can sit on the
           far right while the title + subtitle stay left-aligned. */}
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16 }}>
         <div>
@@ -1647,7 +1647,7 @@ export default function SimulationPage() {
             Control the simulation and monitor the pub/sub pipeline in real time
           </div>
         </div>
-        {/* Revenue Guardian link removed */}
+        {/* C&T Risk Management link removed */}
         <button
           onClick={() => setPresentationMode(p => !p)}
           title="Reduce UI refresh rate to 2 fps for smooth screen-sharing"

@@ -1,12 +1,12 @@
 """
 Generate a 4-slide architecture deck for the EU Customs Data Hub +
-Revenue Guardian integration.
+C&T Risk Management System integration.
 
 Slides:
   1. Component architecture (frontend + backend, info gateways)
   2. Data architecture
   3. Functional architecture + HL integration changes
-  4. Backend/Frontend vs EU_custom_data_hub/revenue-guardian split
+  4. Backend/Frontend vs EU_custom_data_hub/customsandtaxriskmanagemensystem split
 """
 from pathlib import Path
 
@@ -196,7 +196,7 @@ add_subtitle(s, "Two independent processes (port 8000 & 8080). All cross-process
 # Backend zone (left)
 add_zone(s, 0.4, 1.2, 6.8, 5.6, "BACKEND  •  EU_custom_data_hub_RTDemo  •  FastAPI  •  port 8000", EU_BLUE_LT, EU_BLUE)
 # Frontend zone (right)
-add_zone(s, 7.45, 1.2, 5.5, 5.6, "FRONTEND  •  revenue-guardian  •  Vite + React  •  port 8080", PURPLE_LT, PURPLE)
+add_zone(s, 7.45, 1.2, 5.5, 5.6, "FRONTEND  •  customsandtaxriskmanagemensystem  •  Vite + React  •  port 8080", PURPLE_LT, PURPLE)
 
 # Backend blocks
 add_box(s, 0.7, 1.7, 1.9, 0.55, "Simulation engine", WHITE, EU_BLUE, 9, sub="replay of March-2026 txs", sub_size=7)
@@ -266,7 +266,7 @@ add_title(s, "2. Data architecture")
 add_subtitle(s, "Three SQLite stores, two of which are now decoupled. Snapshot semantics on case-open.")
 
 # investigation.db (active, 3 tables)
-add_zone(s, 0.4, 1.2, 6.8, 4.0, "investigation.db  •  authoritative for Revenue Guardian", PURPLE_LT, PURPLE)
+add_zone(s, 0.4, 1.2, 6.8, 4.0, "investigation.db  •  authoritative for C&T Risk Management System", PURPLE_LT, PURPLE)
 
 add_box(s, 0.7, 1.7, 2.0, 1.55,
         "Sales_Order\n(snapshot)",
@@ -331,7 +331,7 @@ add_box(s, 7.75, 4.7, 5.0, 0.4, "(events persisted as JSON for replay & counters
         WHITE, TEAL, 8, bold=False)
 
 # Frontend cache
-add_zone(s, 7.45, 5.35, 5.5, 2.0, "revenue-guardian frontend memory", PURPLE_LT, PURPLE)
+add_zone(s, 7.45, 5.35, 5.5, 2.0, "customsandtaxriskmanagemensystem frontend memory", PURPLE_LT, PURPLE)
 add_box(s, 7.75, 5.85, 5.0, 0.45, "caseStore: Map<Case_ID, BackendCase>",
         WHITE, PURPLE, 10, sub="hydrated from REST + SSE", sub_size=7)
 add_box(s, 7.75, 6.35, 5.0, 0.45, "referenceStore: lookup bundle",
@@ -418,7 +418,7 @@ add_bullets(s, 8.9, ch_top, 4.05, 2.45,
 add_footer(s, "All three columns map back to the components on Slide 1; Custom Outcome is the new exit point of the pipeline.")
 
 # ============================================================================
-# Slide 4 — Two viewpoints: backend/frontend  vs  EU_custom_data_hub/revenue-guardian
+# Slide 4 — Two viewpoints: backend/frontend  vs  EU_custom_data_hub/customsandtaxriskmanagemensystem
 # ============================================================================
 s = prs.slides.add_slide(blank)
 add_title(s, "4. Two viewpoints — process vs. project")
@@ -437,7 +437,7 @@ def header(slide, x, y, w, text, color):
 
 # Layout: 2 columns × 2 rows
 # Top row = process role (Backend / Frontend)
-# Left col = EU_custom_data_hub repo, Right col = revenue-guardian repo
+# Left col = EU_custom_data_hub repo, Right col = customsandtaxriskmanagemensystem repo
 header(s, 4.4, 0.95, 4.0, "Backend (server, port 8000)", EU_BLUE)
 header(s, 8.55, 0.95, 4.0, "Frontend (UI, port 8080)", PURPLE)
 
@@ -489,13 +489,13 @@ add_bullets(s, COL2_X, ROW1_Y + 0.4, 4.0, ROW_H - 0.55,
                 "URL: http://localhost:8000",
                 "Pipeline diagram with broker + factory tiles",
                 "Custom Outcome counters live here",
-                "(Independent of revenue-guardian)",
+                "(Independent of customsandtaxriskmanagemensystem)",
             ])
 
-# Row 2 — revenue-guardian repo
+# Row 2 — customsandtaxriskmanagemensystem repo
 add_zone(s, 0.4, ROW2_Y, 12.55, ROW_H,
-         "revenue-guardian  (repo)", PURPLE_LT, PURPLE)
-vlabel(s, 0.55, ROW2_Y + 0.4, ROW_H - 0.5, "revenue-guardian  REPO", PURPLE)
+         "customsandtaxriskmanagemensystem  (repo)", PURPLE_LT, PURPLE)
+vlabel(s, 0.55, ROW2_Y + 0.4, ROW_H - 0.5, "customsandtaxriskmanagemensystem  REPO", PURPLE)
 
 add_bullets(s, COL1_X, ROW2_Y + 0.4, 4.0, ROW_H - 0.55,
             title="Backend role  —  none",

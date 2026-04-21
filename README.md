@@ -63,7 +63,7 @@ The Customs and Tax operator dashboards live in a companion repository: **[C&T R
 
 ### Two-entity workflow
 
-Customs and Tax are modelled as two **completely separate offices**, each with its own broker listener, in-memory queue, SSE stream, and Revenue Guardian dashboard page. Routing on the Release Factory:
+Customs and Tax are modelled as two **completely separate offices**, each with its own broker listener, in-memory queue, SSE stream, and C&T Risk Management System dashboard page. Routing on the Release Factory:
 
 | Risk Score | Topic | Lands in | Operator action |
 |---|---|---|---|
@@ -165,7 +165,7 @@ cp vat_fraud_detection/.env.example vat_fraud_detection/.env
 Then edit `vat_fraud_detection/.env`:
 ```
 LM_STUDIO_BASE_URL=http://localhost:1234/v1
-LM_STUDIO_MODEL=your-model-identifier-here
+LM_STUDIO_MODEL=mistralai/mistral-7b-instruct-v0.3
 ```
 
 To find the exact model identifier, query the LM Studio server:
@@ -348,10 +348,10 @@ EU_custom_data_hub_RTDemo/
 | GET  | `/api/queue` | Latest 30 transactions (REST snapshot) |
 | GET  | `/api/queue/stream` | SSE — one transaction per event |
 | GET  | `/api/transactions` | Paginated historical query |
-| GET  | `/api/transactions/{id}/timeline` | Full chronological broker-event history for a single transaction (used by the Revenue Guardian case-detail page) |
+| GET  | `/api/transactions/{id}/timeline` | Full chronological broker-event history for a single transaction (used by the C&T Risk Management System case-detail page) |
 | GET  | `/api/metrics` | VAT aggregates with filters |
 | GET  | `/api/alarms` | Alarm list (`?active_only=true` optional) |
-| GET  | `/api/suspicious` | Last 50 suspicious transactions (used by the Revenue Guardian Customs Authority dashboard) |
+| GET  | `/api/suspicious` | Last 50 suspicious transactions (used by the C&T Risk Management System Customs Authority dashboard) |
 | GET  | `/api/agent-log` | Audit history of every Tax officer agent run with legislation refs |
 | GET  | `/api/ireland-queue` | Cases queued for Irish Revenue investigation |
 | GET  | `/api/ireland-case/{id}` | Full case detail |

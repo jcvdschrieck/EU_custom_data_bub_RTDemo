@@ -33,7 +33,7 @@ function RiskBadge({ score }) {
 // ── Analyse button (DISABLED) ─────────────────────────────────────────────────
 //
 // The VAT Fraud Detection Agent is now driven exclusively from the
-// revenue-guardian UI on http://localhost:8080. Investigations land in the
+// C&T Risk Management System UI on http://localhost:8080. Investigations land in the
 // holding queue (POST /api/investigations/* endpoints) and the operator
 // triggers the agent + decides release/retain from there. The button below
 // is kept as a non-interactive chip so the column layout doesn't shift.
@@ -41,7 +41,7 @@ function RiskBadge({ score }) {
 function AnalyseButton(_props) {
   return (
     <span
-      title="Agent control has moved to the Revenue Guardian UI on :8080"
+      title="Agent control has moved to the C&T Risk Management System UI on :8080"
       style={{
         fontSize: 11,
         color: 'var(--text-muted)',
@@ -53,7 +53,7 @@ function AnalyseButton(_props) {
         whiteSpace: 'nowrap',
         cursor: 'help',
       }}>
-      ⚡ Agent in Revenue Guardian
+      ⚡ Agent in C&T Risk Management
     </span>
   )
 }

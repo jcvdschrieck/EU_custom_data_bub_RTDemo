@@ -116,7 +116,7 @@ CREATE INDEX IF NOT EXISTS idx_ireland_queue_tx ON ireland_queue(transaction_id)
 """
 
 
-# ── Reference tables (lookups previously hardcoded in revenue-guardian) ──────
+# ── Reference tables (lookups previously hardcoded in the frontend) ──────────
 #
 # Hosted in european_custom.db. Read by GET /api/reference; seeded on first
 # init from the constants below (idempotent — INSERT OR IGNORE).
@@ -470,7 +470,7 @@ def init_european_custom_db() -> None:
 def init_investigation_db() -> None:
     """Create the 3-table case dataset (Sales_Order + Sales_Order_Risk +
     Sales_Order_Case) in investigation.db. These mirror the data model used
-    by the data hub and give Revenue Guardian a self-contained store."""
+    by the data hub and give the C&T Risk Management System a self-contained store."""
     _init_ddl(INVESTIGATION_DB, _SALES_ORDER_DDL)
     _init_ddl(INVESTIGATION_DB, _SALES_ORDER_RISK_DDL)
     _init_ddl(INVESTIGATION_DB, _SALES_ORDER_CASE_DDL)

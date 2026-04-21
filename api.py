@@ -68,9 +68,9 @@ Message flow (publish-subscribe)
               (30-s polling tick)    line_item_risk +
                                       line_item_ai_analysis
 
-The Customs Officer console (Revenue Guardian /customs page) is master:
+The Customs Officer console (C&T Risk Management System /customs page) is master:
 its release/retain decision is the terminal event. The Tax Officer console
-(Revenue Guardian /tax page) only issues a recommendation that the Customs
+(C&T Risk Management System /tax page) only issues a recommendation that the Customs
 Officer can accept or override (audited via the custom_override flag).
 
 Key endpoints
@@ -164,7 +164,7 @@ _live_queue:          deque[dict]        = deque(maxlen=QUEUE_SIZE)
 _live_alarms:         list[dict]         = []
 _sse_queues:          set[asyncio.Queue] = set()   # live-transaction stream subscribers
 _sim_state_sse:       set[asyncio.Queue] = set()   # pipeline + status stream subscribers
-_rg_case_sse:         set[asyncio.Queue] = set()   # Revenue Guardian case stream subscribers
+_rg_case_sse:         set[asyncio.Queue] = set()   # C&T Risk Management System case stream subscribers
 
 # ── VAT Fraud Detection agent queue ─────────────────────────────────────────
 # Single asyncio queue + single worker. LM Studio serializes inference
@@ -177,7 +177,7 @@ from lib import case_statuses as STATUS
 
 
 def _push_rg_case_sse(payload: dict) -> None:
-    """Push a case event to all connected Revenue Guardian SSE clients."""
+    """Push a case event to all connected C&T Risk Management System SSE clients."""
     if not _rg_case_sse:
         return
     import json as _json
@@ -194,7 +194,7 @@ def _push_rg_case_sse(payload: dict) -> None:
 # ── Two-entity workflow queues ───────────────────────────────────────────────
 #
 # Customs and Tax are modelled as two completely separate offices with their
-# own listener, queue, SSE subscribers and UI page on the revenue-guardian UI.
+# own listener, queue, SSE subscribers and UI page on the C&T Risk Management System UI.
 # They communicate via two well-defined inter-entity transfers:
 #
 #   AMBER  → Tax Office  (initial entry)
@@ -232,7 +232,7 @@ def _push_rg_case_sse(payload: dict) -> None:
 #     "created_at":               ISO8601,
 #     "updated_at":               ISO8601,
 #   }
-# (Revenue Guardian queues + SSE sets removed)
+# (C&T Risk Management System queues + SSE sets removed)
 
 # Registry of in-flight delayed factory tasks (Order Validation + Arrival
 # Notification + manual agent runs). Each factory adds its newly-created task
@@ -837,7 +837,7 @@ async def _ct_risk_management_factory() -> None:
     Subscribes to ASSESSMENT_OUTCOME (retain + investigate routes only).
     For each such event, atomically writes the 3-row case dataset
     (Sales_Order + Sales_Order_Risk + Sales_Order_Case) into
-    investigation.db and pushes the hydrated case to Revenue Guardian
+    investigation.db and pushes the hydrated case to C&T Risk Management System
     SSE subscribers.
 
     Does NOT publish INVESTIGATION_OUTCOME at creation. That event is the
@@ -1017,7 +1017,7 @@ async def _ct_risk_management_factory() -> None:
     await asyncio.gather(_drain_tx(), _drain_assessment())
 
 
-# ── (Revenue Guardian two-entity workflow removed — replaced by
+# ── (C&T Risk Management System two-entity workflow removed — replaced by
 # _ct_risk_management_factory above.) ──
 
 
@@ -1366,7 +1366,7 @@ def api_get_suspicious(limit: int = Query(50, ge=1, le=200)):
 #
 # Read-only audit log of every VAT Fraud Detection Agent run, populated by
 # api_tax_run_agent on the new two-entity flow. The agent itself is now
-# triggered exclusively from the Tax officer's Revenue Guardian page via
+# triggered exclusively from the Tax officer's C&T Risk Management System page via
 # POST /api/tax/{transaction_id}/run-agent.
 
 @app.get("/api/agent-log")
@@ -1394,7 +1394,7 @@ def api_ireland_case(transaction_id: str):
 
 @app.get("/api/reference")
 def api_reference():
-    """Bundled reference data consumed by the Revenue Guardian SPA at startup.
+    """Bundled reference data consumed by the C&T Risk Management System SPA at startup.
 
     Returns the four lookup tables seeded in european_custom.db. Static-ish
     data — refresh by re-fetching, no SSE channel.
@@ -1418,11 +1418,11 @@ def api_reference():
     }
 
 
-# ── Revenue Guardian: REST + SSE endpoints ────────────────────────────────────
+# ── C&T Risk Management System: REST + SSE endpoints ──────────────────────────
 
 @app.get("/api/rg/cases")
 def api_rg_cases(status: str | None = Query(None), limit: int = Query(200, ge=1, le=1000)):
-    """List all cases for Revenue Guardian, hydrated with Sales_Order +
+    """List all cases for C&T Risk Management System, hydrated with Sales_Order +
     Sales_Order_Risk fields. Optionally filter by Status."""
     from lib.database import get_all_cases_hydrated
     return {"items": get_all_cases_hydrated(status=status, limit=limit)}
@@ -1430,7 +1430,7 @@ def api_rg_cases(status: str | None = Query(None), limit: int = Query(200, ge=1,
 
 @app.get("/api/rg/cases/stream")
 async def api_rg_cases_stream(request: Request):
-    """SSE stream: pushes case events (new_case, case_updated) to Revenue Guardian."""
+    """SSE stream: pushes case events (new_case, case_updated) to C&T Risk Management System."""
     q: asyncio.Queue = asyncio.Queue(maxsize=100)
     _rg_case_sse.add(q)
     async def _gen():
@@ -2030,7 +2030,7 @@ def sim_reset():
     reset_alarms()          # removes March+ rows, keeps Sep–Feb history
     from lib.database import reset_cases
     reset_cases()           # clear investigation cases
-    _push_rg_case_sse({"event": "cases_reset"})  # notify Revenue Guardian clients
+    _push_rg_case_sse({"event": "cases_reset"})  # notify C&T Risk Management System clients
     flush_events()
     from lib.broker import broker as _b
     drained = _b.drain_all()

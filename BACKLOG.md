@@ -22,7 +22,7 @@ as raw strings.
   a rename would need a coordinated frontend update.
 
 **When this matters:** the moment a new route is added (e.g.
-`escalate`) or the label vocabulary is exposed to the Revenue Guardian
+`escalate`) or the label vocabulary is exposed to the C&T Risk Management System
 frontend.
 
 ---

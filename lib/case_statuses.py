@@ -1,7 +1,7 @@
 """
 Single source of truth for Sales_Order_Case.Status values used by the
-Revenue Guardian flow. The frontend has a mirror file (see
-revenue-guardian/src/lib/caseStatuses.ts) — keep both in sync.
+C&T Risk Management System flow. The frontend has a mirror file (see
+customsandtaxriskmanagemensystem/src/lib/caseStatuses.ts) — keep both in sync.
 
 These strings are persisted to investigation.db and travel over the wire
 on every /api/rg/cases payload, so renaming any of them is a breaking
