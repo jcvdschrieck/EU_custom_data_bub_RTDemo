@@ -1649,6 +1649,73 @@ async def _agent_worker() -> None:
             _agent_queue.task_done()
 
 
+@app.post("/api/rg/cases/{case_id}/ask")
+async def api_rg_case_ask(case_id: str, body: dict):
+    """AI assistant: answer a question about a case using LM Studio."""
+    from lib.database import get_case_hydrated, get_case_orders
+    from lib.llm_client import LMStudioClient
+
+    case = get_case_hydrated(case_id)
+    if not case:
+        return JSONResponse(status_code=404, content={"detail": "Case not found"})
+
+    question = body.get("question", "").strip()
+    if not question:
+        return JSONResponse(status_code=400, content={"detail": "No question provided"})
+
+    orders = get_case_orders(case_id)
+    order_lines = "\n".join(
+        f"  - {o.get('Product_Description','?')} | €{o.get('Product_Value',0)} | "
+        f"VAT {(o.get('VAT_Rate',0) or 0)*100:.0f}% | "
+        f"{o.get('Country_Origin','?')} → {o.get('Country_Destination','?')}"
+        for o in orders
+    )
+    engine_info = (
+        f"Engine scores: VAT Ratio={case.get('Engine_VAT_Ratio',0):.2f}, "
+        f"ML Watchlist={case.get('Engine_ML_Watchlist',0):.2f}, "
+        f"IE Seller={case.get('Engine_IE_Seller_Watchlist',0):.2f}, "
+        f"Vagueness={case.get('Engine_Description_Vagueness',0):.2f}"
+    )
+    ai_analysis = case.get("AI_Analysis") or "No AI analysis performed yet."
+    comm = case.get("Communication", []) or []
+    comm_text = "\n".join(
+        f"  [{c.get('date','')}] {c.get('from','')}: {c.get('action','')} — {c.get('message','')}"
+        for c in comm[-10:]
+    ) if comm else "No communication log entries."
+
+    system_prompt = f"""You are an AI assistant helping customs and tax officers investigate a case.
+Answer questions concisely based ONLY on the case data provided below. If the data doesn't contain
+the answer, say so. Be factual and precise.
+
+CASE: {case_id}
+Status: {case.get('Status')}
+Seller: {case.get('Seller_Name')} ({case.get('Country_Origin')})
+Destination: {case.get('Country_Destination')}
+Category: {case.get('HS_Product_Category')}
+Overall Risk Score: {case.get('Overall_Case_Risk_Score',0):.2f} ({case.get('Overall_Case_Risk_Level','?')})
+{engine_info}
+VAT Problem Type: {case.get('VAT_Problem_Type','None')}
+
+Orders ({len(orders)}):
+{order_lines}
+
+AI VAT Fraud Detection Analysis: {ai_analysis}
+
+Communication log:
+{comm_text}"""
+
+    try:
+        client = LMStudioClient()
+        answer = await client.chat([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": question},
+        ], temperature=0.3, max_tokens=300)
+        await client.aclose()
+        return {"answer": answer}
+    except Exception as e:
+        return {"answer": f"Unable to reach AI assistant: {e}"}
+
+
 @app.get("/api/rg/agent/queue")
 def api_rg_agent_queue():
     """Live queue depth + current case under analysis. UI feedback only."""
