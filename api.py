@@ -996,6 +996,20 @@ async def _ct_risk_management_factory() -> None:
                     hydrated = get_case_hydrated(case_id) or {"Case_ID": case_id}
                     _push_rg_case_sse({"event": "new_case", "case": hydrated})
                     print(f"  [C&T] case {case_id} created for {tx.get('seller_name','?')}")
+                    insert_agent_log({
+                        "transaction_id": case_id,
+                        "seller_name": tx.get("seller_name"),
+                        "buyer_country": tx.get("buyer_country"),
+                        "item_description": tx.get("item_description"),
+                        "item_category": tx.get("item_category"),
+                        "value": tx.get("value"),
+                        "vat_rate": tx.get("vat_rate"),
+                        "correct_vat_rate": None,
+                        "verdict": "case_created",
+                        "reasoning": f"Case {case_id} created — {problem_type}",
+                        "legislation_refs": "[]", "sent_to_ireland": 0,
+                        "processed_at": now_iso,
+                    })
             except Exception as e:
                 print(f"  [C&T] ERROR processing assessment: {e}")
                 import traceback; traceback.print_exc()
@@ -1687,6 +1701,18 @@ async def api_rg_customs_action(case_id: str, body: dict):
         outcome_map = {"retainment": "retained", "release": "released", "refused": "refused"}
         await _publish_investigation_outcome(case_id, outcome_map[action])
     if action == "tax_review":
+        insert_agent_log({
+            "transaction_id": case_id, "seller_name": case.get("Seller_Name"),
+            "buyer_country": case.get("Country_Destination"),
+            "item_description": case.get("Product_Description"),
+            "item_category": case.get("HS_Product_Category"),
+            "value": case.get("Product_Value"), "vat_rate": case.get("VAT_Rate"),
+            "correct_vat_rate": None,
+            "verdict": "sent_to_tax",
+            "reasoning": f"Case {case_id} submitted for tax review by {officer}",
+            "legislation_refs": "[]", "sent_to_ireland": 0,
+            "processed_at": now_iso,
+        })
         await _enqueue_for_agent(case_id)
     return {"ok": True}
 

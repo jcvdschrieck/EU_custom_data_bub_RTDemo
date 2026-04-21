@@ -12,8 +12,10 @@ const VERDICT = {
   correct:    { icon: '✅', color: 'var(--success)', bg: '#f0fff4', label: 'CORRECT'    },
   legitimate: { icon: '✅', color: 'var(--success)', bg: '#f0fff4', label: 'LEGITIMATE' },
   uncertain:  { icon: '❓', color: '#856404',        bg: '#fffbe6', label: 'UNCERTAIN'  },
-  processing: { icon: '⚙️', color: '#005ea2',        bg: '#e8f1f8', label: 'PROCESSING' },
-  queued:     { icon: '📥', color: '#666',           bg: '#f5f5f5', label: 'QUEUED'     },
+  processing:   { icon: '⚙️', color: '#005ea2',        bg: '#e8f1f8', label: 'PROCESSING'    },
+  queued:       { icon: '📥', color: '#666',           bg: '#f5f5f5', label: 'QUEUED'        },
+  case_created: { icon: '📋', color: '#2e7d32',        bg: '#f0fff4', label: 'CASE CREATED'  },
+  sent_to_tax:  { icon: '📤', color: '#005ea2',        bg: '#e8f1f8', label: 'SENT TO TAX'   },
 }
 
 // ── Detail drawer ─────────────────────────────────────────────────────────────
@@ -167,6 +169,7 @@ const DARK_TEXT = '#1a1a2e'
 function LogLine({ entry, onDetails }) {
   const isProcessing = entry.verdict === 'processing' || entry.type === 'processing'
   const isQueued = entry.verdict === 'queued'
+  const isLifecycle = ['queued', 'processing', 'case_created', 'sent_to_tax'].includes(entry.verdict)
   const v = VERDICT[entry.verdict] || VERDICT.uncertain
 
   const ts = entry.processed_at?.slice(11, 19) || entry.started_at?.slice(11, 19)
@@ -210,7 +213,7 @@ function LogLine({ entry, onDetails }) {
       </span>
 
       {/* Details button */}
-      {!isProcessing && !isQueued && (
+      {!isLifecycle && (
         <button onClick={() => onDetails(entry)} style={{
           background: 'none', border: '1px solid var(--border)',
           borderRadius: 4, padding: '2px 8px', cursor: 'pointer',
@@ -338,10 +341,12 @@ export default function ProcessingLogPage() {
               fontSize: 12, color: 'var(--text-muted)',
             }}>
               <div style={{ fontSize: 24, marginBottom: 8 }}>⏳</div>
-              Waiting for suspicious Ireland-bound transactions…
-              <br />
+              No agent activity yet.
+              <br /><br />
               <span style={{ fontSize: 11 }}>
-                Scenario: TechZone GmbH → IE alarm fires during week 2 of March 2026.
+                The agent processes cases submitted for tax review by customs officers.
+                <br />
+                Events will appear here when cases are created, queued, and analysed.
               </span>
             </div>
           ) : (
