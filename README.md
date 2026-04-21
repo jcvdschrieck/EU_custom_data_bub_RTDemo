@@ -2,7 +2,7 @@
 
 A real-time simulation of the European Commission's **Taxation and Customs Union** transaction monitoring system. The application streams B2C cross-border e-commerce transactions across 27 EU member states, scores them in real time for VAT fraud risk, routes RED and AMBER cases through two independent operator queues (Customs and Tax), and persists the full lifecycle into a normalised data hub.
 
-The Customs and Tax operator dashboards live in a companion repository: **[revenue-guardian](https://github.com/jcvdschrieck/revenue-guardian)**.
+The Customs and Tax operator dashboards live in a companion repository: **[C&T Risk Management System](https://github.com/jcvdschrieck/customsandtaxriskmanagemensystem)** (forked from [caguilarvz/customsandtaxriskmanagemensystem](https://github.com/caguilarvz/customsandtaxriskmanagemensystem)).
 
 ---
 
@@ -43,13 +43,13 @@ The Customs and Tax operator dashboards live in a companion repository: **[reven
                │ HTTP / SSE / static              │ HTTP + SSE + CORS
                ▼                                  ▼
 ┌──────────────────────────────────┐  ┌──────────────────────────────┐
-│  Internal React + Vite frontend  │  │  Revenue Guardian            │
-│  served by FastAPI on :8000      │  │  (sibling repo, :8080 in dev)│
+│  Internal React + Vite frontend  │  │  C&T Risk Management System  │
+│  served by FastAPI on :8000      │  │  (companion repo, :8080 dev) │
 │  ├─ Simulation diagram & ctrl    │  │  Vite + React + shadcn/ui    │
 │  ├─ Live queue / Dashboard       │  │  ├─ Customs Authority page   │
 │  ├─ Suspicious transactions      │  │  ├─ Tax Authority page       │
-│  ├─ Agent Log (audit history)    │  │  └─ Investigation case detail│
-│  └─ Ireland investigation queue  │  │     (timeline)               │
+│  ├─ Agent Log (audit history)    │  │  ├─ Case Review (detail)     │
+│  └─ Ireland investigation queue  │  │  └─ Closed Cases archive     │
 └──────────────────────────────────┘  └──────────────────────────────┘
                                                   │ subprocess
                                                   ▼
@@ -199,32 +199,46 @@ Then open [http://localhost:8000](http://localhost:8000). You will land on the *
 
 > The frontend is served directly by FastAPI — no separate `npm run dev` needed in production. For frontend hot-reload during development, run `npm run dev` in `frontend/` and point your browser to `http://localhost:5175`.
 
-### Running alongside Revenue Guardian (integrated mode)
+### Running alongside C&T Risk Management System (integrated mode)
 
-The companion `revenue-guardian` UI consumes this backend's `/api/rg/cases/*` REST + SSE endpoints. The C&T Risk Management Factory writes a 3-row dataset (`Sales_Order` + `Sales_Order_Risk` + `Sales_Order_Case`) into `investigation.db`; the frontend reads cases from there via `GET /api/rg/cases` and subscribes to `/api/rg/cases/stream` for live updates. Officer actions (release / retain / submit-for-tax-review / final-decision / communication) POST back to the corresponding endpoints; case closure publishes a terminal `INVESTIGATION_OUTCOME` event to the broker.
+The companion **C&T Risk Management System** frontend consumes this backend's `/api/rg/cases/*` REST + SSE endpoints. The C&T Risk Management Factory creates investigation cases from amber-routed assessments, writing a 3-row dataset (`Sales_Order` + `Sales_Order_Risk` + `Sales_Order_Case`) into `investigation.db`. The frontend reads cases via `GET /api/rg/cases` and subscribes to `/api/rg/cases/stream` for live updates. Officer actions POST back to the corresponding endpoints; case closure publishes a terminal `INVESTIGATION_OUTCOME` event.
 
-**Branches used in the integration:**
+**Branches:**
 - `EU_custom_data_hub_RTDemo` → branch **`backend-v2`**
-- `revenue-guardian` → branch **`integrationV2`**
+- `customsandtaxriskmanagemensystem` → branch **`main`**
 
+**Remotes setup** (fork model):
+```bash
+# C&T Risk Management repo
+cd customsandtaxriskmanagemensystem
+git remote -v
+# origin    git@github.com:jcvdschrieck/customsandtaxriskmanagemensystem.git  (your fork)
+# upstream  git@github.com:caguilarvz/customsandtaxriskmanagemensystem.git    (owner)
+```
+
+**Launch:**
 ```bash
 # Terminal 1 — backend
 cd EU_custom_data_hub_RTDemo
 git checkout backend-v2
-python -m uvicorn api:app --host 0.0.0.0 --port 8000
+python -c "import api; import uvicorn; uvicorn.run(api.app, host='0.0.0.0', port=8000)"
 
-# Terminal 2 — frontend (sibling repo)
-cd ../revenue-guardian
-git checkout integrationV2
+# Terminal 2 — frontend
+cd customsandtaxriskmanagemensystem
 npm install   # first time only
-npm run dev   # serves on http://localhost:8080
+npx vite      # serves on http://localhost:8080
 ```
 
-Open the EU Custom Data Hub at `:8000` (click **▶ Start** on the simulation page), then the Revenue Guardian portal at `:8080`. Cases routed to **retain** or **investigate** by the Release Factory automatically appear on the **Customs Authority** page within seconds via SSE. Cases the Customs Officer forwards via *Submit for Tax Review* show up on the **Tax Authority** page.
+The frontend needs a `.env` file:
+```
+VITE_API_BASE_URL=http://localhost:8000
+```
 
-CORS on the backend is open (`allow_origins=["*"]`) so the frontend at `:8080` can call the backend at `:8000` directly — no proxy needed.
+Open the EU Custom Data Hub at `:8000` (click **▶ Start** on the simulation page), then the C&T Risk Management portal at `:8080`. Cases routed to **investigate** by the Release Factory automatically appear on the **Customs Authority** page (IE-destined only) within seconds via SSE. Cases the Customs Officer forwards via *Submit for Tax Review* trigger the AI VAT Fraud Detection Agent, then appear on the **Tax Authority** page.
 
-A simulation reset on `:8000` emits a `cases_reset` SSE event that the frontend listens for; it clears its in-memory case map and wipes its officer-state localStorage cache so both sides stay in sync.
+CORS on the backend is open (`allow_origins=["*"]`) so the frontend at `:8080` can call the backend at `:8000` directly.
+
+A simulation reset on `:8000` emits `cases_reset` + `reset` SSE events that the frontend listens for — it clears its in-memory case map and wipes its localStorage cache so both sides stay in sync without a manual page refresh.
 
 ---
 
@@ -241,13 +255,17 @@ Internal React frontend served at `:8000`:
 | Agent Log | `/agent-log` | Audit history of every Tax officer agent run with legislation references |
 | Ireland Queue | nav dropdown | Per-country investigation queue (Ireland live, others placeholder) |
 
-Revenue Guardian frontend (sibling repo, served at `:8080`):
+C&T Risk Management frontend (companion repo, served at `:8080`):
 
 | Page | URL | Description |
 |---|---|---|
-| Customs Authority | `/customs-authority` | Live Customs queue (RED-routed items only — decided transactions are removed immediately). Actions: release / retain / escalate-to-Tax |
-| Tax Authority | `/tax-authority` | Live Tax queue (AMBER-routed + escalated from Customs). Actions: Run Agent + Recommend (release / retain) |
-| Investigation | `/investigation/:id` | Case detail with full timeline, agent verdict, recommendation history |
+| Access Portal | `/` | Authority + country selection (Ireland enabled) |
+| Customs Authority | `/customs-authority` | Ongoing investigation cases (IE only). Actions: release / retain / submit for tax review / request third-party input. Bulk actions supported. |
+| Closed Cases | `/customs-authority/closed` | Archive of closed cases |
+| Case Review | `/customs-authority/case/:id` | Case detail with AI summary, risk signals (from backend engines), linked orders, previous cases, correlate tab |
+| Tax Authority | `/tax-authority` | Cases under tax review + AI investigation. Shows "AI Processing" / "Ready for Review" status |
+| Tax Case Review | `/tax-authority/case/:id` | Tax review with VAT assessment, AI agent rationale button, officer-suggested VAT |
+| Manage Rules | `/manage-rules` | Business rule management |
 
 ### Risk levels
 
@@ -340,23 +358,20 @@ EU_custom_data_hub_RTDemo/
 | GET  | `/api/catalog/suppliers` | Supplier catalogue |
 | GET  | `/api/catalog/countries` | Country list |
 
-### Customs Office (Revenue Guardian Customs Authority page)
+### C&T Risk Management System (case-based API)
 
 | Method | Endpoint | Description |
 |---|---|---|
-| GET  | `/api/customs/queue` | Snapshot of the live Customs queue |
-| GET  | `/api/customs/queue/stream` | SSE — Customs queue updates |
-| POST | `/api/customs/{id}/escalate-to-tax` | Move an item from the Customs queue to the Tax queue |
-| POST | `/api/customs/{id}/decide` | Body `{action: "release"\|"retain"}`. Terminal decision. Publishes `AGENT_RELEASE_EVENT` or `AGENT_RETAIN_EVENT` and writes the audit trail (with `custom_override = true` if the decision differs from the Tax recommendation). |
-
-### Tax Office (Revenue Guardian Tax Authority page)
-
-| Method | Endpoint | Description |
-|---|---|---|
-| GET  | `/api/tax/queue` | Snapshot of the live Tax queue |
-| GET  | `/api/tax/queue/stream` | SSE — Tax queue updates |
-| POST | `/api/tax/{id}/run-agent` | Trigger the VAT Fraud Detection Agent on a Tax queue item. Returns 202; the verdict lands via the SSE stream when ready. Publishes `AI_ANALYSIS_EVENT` so the data hub writer populates `line_item_ai_analysis`. |
-| POST | `/api/tax/{id}/recommend` | Body `{recommendation: "release"\|"retain"}`. Non-binding recommendation that transfers the item back to the Customs queue. |
+| GET  | `/api/rg/cases` | All investigation cases (hydrated with orders + risk scores) |
+| GET  | `/api/rg/cases/{id}` | Single case detail |
+| GET  | `/api/rg/cases/stream` | SSE — live case events (`new_case`, `case_updated`, `cases_reset`) |
+| GET  | `/api/rg/cases/{id}/previous` | Previous closed cases from the same seller |
+| GET  | `/api/rg/cases/{id}/correlated` | Open cases with the same declared category |
+| POST | `/api/rg/cases/{id}/customs-action` | Body `{action: "retainment"\|"release"\|"tax_review"\|"input_requested"}`. Customs officer action. `tax_review` triggers the AI agent. |
+| POST | `/api/rg/cases/{id}/tax-action` | Body `{action: "risk_confirmed"\|"no_limited_risk"\|"input_requested"}`. Tax officer action. Returns case to customs. |
+| POST | `/api/rg/cases/{id}/communication` | Body `{from, action, message}`. Append to case communication log. |
+| GET  | `/api/rg/agent/queue` | Live agent queue depth + case currently under analysis |
+| GET  | `/api/reference` | Reference data: VAT categories, risk levels, regions, suspicion types, risk engine signals, risk thresholds |
 
 ### Simulation control
 
