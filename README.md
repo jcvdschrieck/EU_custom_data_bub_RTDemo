@@ -13,22 +13,22 @@ The Customs and Tax operator dashboards live in a companion repository: **[C&T R
 │  FastAPI backend (port 8000)                                         │
 │                                                                      │
 │  Simulation engine                                                   │
-│    └─ Continuous-clock replay of a 15-min compressed March-2026      │
+│    └─ Continuous-clock replay of a 15-min compressed April-2026      │
 │       window. One Sales Order Event published per sim-clock tick.    │
 │                                                                      │
 │  Pub/sub pipeline (lib/broker.py — in-memory MessageBroker)          │
-│    ├─ RT Risk Assessment 1   — VAT-ratio deviation alarm             │
-│    ├─ RT Risk Assessment 2   — supplier/origin watchlist             │
-│    ├─ Risk Score Consolidation — GREEN / AMBER / RED                 │
+│    ├─ RT Risk Engine 1   — vat_ratio (declared-vs-expected rate)     │
+│    ├─ RT Risk Engine 2   — watchlist (ML supplier risk)              │
+│    ├─ RT Risk Engine 3   — ireland_watchlist (IE-only, 1–5 s latency)│
+│    ├─ RT Risk Engine 4   — description_vagueness                     │
 │    ├─ Sales Order Validation — field-completeness check              │
-│    ├─ Goods Transport         — exponential-delay arrival event      │
-│    ├─ Release Factory         — joins all signals, routes by colour  │
-│    ├─ Customs Listener        — drains RED  → _customs_queue         │
-│    ├─ Tax Listener            — drains AMBER → _tax_queue            │
-│    ├─ DB Store Worker         — terminal events → european_custom.db │
-│    └─ Data Hub Writer         — 30-s polling tick → 3 normalised     │
-│                                  tables (Sales Order + Line Item,    │
-│                                  Risk, AI Analysis)                  │
+│    ├─ Release Factory   — weighted-sum consolidation, routes         │
+│    │                      Green / Amber / Red                        │
+│    ├─ C&T Risk Management Factory — drains AMBER → cases in          │
+│    │                      investigation.db → SSE to operator UI      │
+│    └─ Exit Process Worker     — terminal events                      │
+│                                                                      │
+│  Risk monitoring details — see docs/risk_monitoring_rules.md         │
 │                                                                      │
 │  Two-entity workflow API                                             │
 │    /api/customs/*  — Customs Office (master, terminal decision)      │
@@ -65,13 +65,17 @@ The Customs and Tax operator dashboards live in a companion repository: **[C&T R
 
 Customs and Tax are modelled as two **completely separate offices**, each with its own broker listener, in-memory queue, SSE stream, and C&T Risk Management System dashboard page. Routing on the Release Factory:
 
-| Risk Score | Topic | Lands in | Operator action |
+| Risk Score | Route | Lands in | Operator action |
 |---|---|---|---|
-| GREEN | `release_event` | DB store (terminal) | none — auto-released |
-| RED   | `retain_event`     | `_customs_queue` | Customs Officer reviews and decides release / retain (or escalates to Tax for advice) |
-| AMBER | `investigate_event`| `_tax_queue`     | Tax Officer optionally runs the VAT Fraud Detection Agent, then issues a non-binding **recommendation** that returns the case to the Customs queue |
+| `< 33.33%` | **Green** → release | terminal event, no case | none — auto-released |
+| `33.33% – 80%` | **Amber** → investigate | `investigation.db` case via the C&T Risk Management Factory | Customs Officer reviews; can release, retain, or submit to Tax for advice. Tax Officer optionally runs the VAT Fraud Detection Agent, then issues a non-binding **recommendation** that returns the case to the Customs queue |
+| `≥ 80%` | **Red** → retain | terminal event, **no case** (retain bypasses C&T by design — retentions arise from officer escalation of an existing investigate case) | none — auto-retained |
 
 The **Customs Officer is master**: their final decision is the only terminal event. When the Customs decision differs from a Tax recommendation, an audit `custom_override = true` flag is set on the published event.
+
+The **C&T frontend filters cases to `Country_Destination == "IE"`** at the read boundary (`backendCaseStore.getAllBackendCases`); non-IE cases are still produced and persisted in `investigation.db`, but are hidden from the Irish authority's UI. Replace the `AUTHORITY_COUNTRY` constant when adding other countries.
+
+Engine details, pre-baking mechanism, weights, thresholds and the `vat_ratio` floor are documented in **[docs/risk_monitoring_rules.md](docs/risk_monitoring_rules.md)**.
 
 ### Data hub
 
@@ -281,7 +285,7 @@ A simplified three-tier risk model maps directly to the pipeline routing:
 
 ## Simulation scenario
 
-All March-2026 source transactions are rescaled at seed time so their timestamps fall inside a **15-sim-minute window** starting at March 1st 00:00:00. The continuous-clock simulation loop advances `sim_time` smoothly between events at one of three multipliers:
+All April-2026 source transactions are rescaled at seed time so their timestamps fall inside a **15-sim-minute window** starting at April 1st 00:00:00. The continuous-clock simulation loop advances `sim_time` smoothly between events at one of three multipliers:
 
 | Multiplier | sim-sec / real-sec | Wall-clock playback |
 |---|---|---|
@@ -332,7 +336,7 @@ EU_custom_data_hub_RTDemo/
 │   └── prompts/                 # LLM system prompts
 └── data/                        # SQLite databases + event files (git-ignored)
     ├── european_custom.db       # Historical + data hub tables
-    ├── simulation.db            # March-2026 transactions to replay
+    ├── simulation.db            # April-2026 transactions to replay
     └── events/                  # Per-topic JSON event files (flushed on reset)
 ```
 
