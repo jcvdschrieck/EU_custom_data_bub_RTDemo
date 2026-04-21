@@ -1562,22 +1562,28 @@ async def _agent_worker() -> None:
             })
 
             destination = (case.get("Country_Destination") or "").upper()
+            # Minimum visible duration so the UI can show the
+            # "AI Investigation in Progress" state before flipping.
+            import time as _time
+            _agent_start = _time.monotonic()
+            MIN_VISIBLE_S = 8
+
             if destination == "IE":
                 tx = _build_agent_tx(case)
-                # Acquire the shared LM Studio slot so any future second
-                # agent queues against the same semaphore, not against
-                # LM Studio's invisible internal queue.
                 async with acquire_slot():
                     result = await asyncio.to_thread(analyse_transaction_sync, tx)
             else:
-                # Out-of-scope country: short-circuit with a fixed delay so
-                # the UI still shows the AI step taking visible time.
-                await asyncio.sleep(5)
+                await asyncio.sleep(MIN_VISIBLE_S)
                 result = {
                     "verdict":   "uncertain",
                     "reasoning": f"Model for country '{destination or 'unknown'}' failed to run.",
                     "success":   False,
                 }
+
+            # Ensure the AI investigation state is visible for at least MIN_VISIBLE_S
+            elapsed = _time.monotonic() - _agent_start
+            if elapsed < MIN_VISIBLE_S:
+                await asyncio.sleep(MIN_VISIBLE_S - elapsed)
 
             verdict   = result.get("verdict", "uncertain")
             reasoning = result.get("reasoning", "")
