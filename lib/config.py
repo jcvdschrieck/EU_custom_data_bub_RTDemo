@@ -23,8 +23,8 @@ API_BASE_URL = f"http://localhost:{API_PORT}"
 # That way ×1 playback runs in real time (1 sim-second per real-second) and
 # the SIM TIME chip ticks visibly second-by-second through the 15-minute
 # window instead of jumping across days.
-SIM_START_STR = "2026-03-01T00:00:00"
-SIM_END_STR   = "2026-03-01T00:15:00"
+SIM_START_STR = "2026-04-01T00:00:00"
+SIM_END_STR   = "2026-04-01T00:15:00"
 SIM_START_DT  = datetime.fromisoformat(SIM_START_STR).replace(tzinfo=timezone.utc)
 SIM_END_DT    = datetime.fromisoformat(SIM_END_STR).replace(tzinfo=timezone.utc)
 SIM_WINDOW_SECONDS = int((SIM_END_DT - SIM_START_DT).total_seconds())   # 900

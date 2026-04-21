@@ -386,6 +386,23 @@ def _connect(path: Path) -> sqlite3.Connection:
     return conn
 
 
+_NEW_DATASET_TX_COLUMNS: list[tuple[str, str]] = [
+    # New-dataset (Stage 3) per-tx fields. All nullable so the legacy
+    # seeder still works — when these are NULL, the engines fall back
+    # to their legacy paths (volume-ratio alarm, 4-tuple ML lookup,
+    # embedding-based vagueness).
+    ("vat_subcategory_code",              "TEXT  DEFAULT NULL"),
+    ("engine_vat_ratio_risk",             "REAL  DEFAULT NULL"),
+    ("engine_ml_risk",                    "REAL  DEFAULT NULL"),
+    ("engine_ml_seller_contribution",     "REAL  DEFAULT NULL"),
+    ("engine_ml_origin_contribution",     "REAL  DEFAULT NULL"),
+    ("engine_ml_category_contribution",   "REAL  DEFAULT NULL"),
+    ("engine_ml_destination_contribution","REAL  DEFAULT NULL"),
+    ("engine_vagueness_risk",             "REAL  DEFAULT NULL"),
+    ("engine_ie_watchlist_risk",          "REAL  DEFAULT NULL"),
+]
+
+
 def _migrate_european_custom_db(conn: sqlite3.Connection) -> None:
     """Add columns / tables introduced after initial schema."""
     for col, definition in [
@@ -397,6 +414,7 @@ def _migrate_european_custom_db(conn: sqlite3.Connection) -> None:
         ("producer_name",    "TEXT    DEFAULT NULL"),
         ("producer_country", "TEXT    DEFAULT NULL"),
         ("producer_city",    "TEXT    DEFAULT NULL"),
+        *_NEW_DATASET_TX_COLUMNS,
     ]:
         try:
             conn.execute(f"ALTER TABLE transactions ADD COLUMN {col} {definition}")
@@ -412,11 +430,18 @@ def _migrate_european_custom_db(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_simulation_db(conn: sqlite3.Connection) -> None:
-    """Add producer columns to existing simulation.db files (the production
-    table column list lives in _TX_DDL but older DB files predate it)."""
-    for col in ("producer_id", "producer_name", "producer_country", "producer_city"):
+    """Add producer + new-dataset columns to existing simulation.db files
+    (the production table column list lives in _TX_DDL but older DB files
+    predate them)."""
+    for col, definition in [
+        ("producer_id",      "TEXT DEFAULT NULL"),
+        ("producer_name",    "TEXT DEFAULT NULL"),
+        ("producer_country", "TEXT DEFAULT NULL"),
+        ("producer_city",    "TEXT DEFAULT NULL"),
+        *_NEW_DATASET_TX_COLUMNS,
+    ]:
         try:
-            conn.execute(f"ALTER TABLE transactions ADD COLUMN {col} TEXT DEFAULT NULL")
+            conn.execute(f"ALTER TABLE transactions ADD COLUMN {col} {definition}")
         except sqlite3.OperationalError:
             pass   # already exists
 
@@ -631,28 +656,51 @@ def init_simulation_db() -> None:
 
 # ── European Custom DB write ───────────────────────────────────────────────────
 
+_TX_INSERT_KEYS: list[str] = [
+    "transaction_id", "transaction_date", "seller_id", "seller_name",
+    "seller_country", "item_description", "item_category",
+    "value", "vat_rate", "vat_amount", "buyer_country",
+    "correct_vat_rate", "has_error", "xml_message", "created_at",
+    "producer_id", "producer_name", "producer_country", "producer_city",
+    # New-dataset (Stage 3) per-tx engine inputs/outputs. Optional —
+    # NULL on legacy rows, populated by lib/new_seeder.py.
+    "vat_subcategory_code",
+    "engine_vat_ratio_risk",
+    "engine_ml_risk",
+    "engine_ml_seller_contribution",
+    "engine_ml_origin_contribution",
+    "engine_ml_category_contribution",
+    "engine_ml_destination_contribution",
+    "engine_vagueness_risk",
+    "engine_ie_watchlist_risk",
+]
+_TX_INSERT_PLACEHOLDERS = ", ".join(f":{k}" for k in _TX_INSERT_KEYS)
+_TX_INSERT_COLS         = ", ".join(_TX_INSERT_KEYS)
+_TX_INSERT_NULLABLE_DEFAULTS = {k: None for k in _TX_INSERT_KEYS
+                                if k not in ("transaction_id", "transaction_date",
+                                             "seller_id", "seller_name", "seller_country",
+                                             "item_description", "item_category",
+                                             "value", "vat_rate", "vat_amount",
+                                             "buyer_country", "correct_vat_rate",
+                                             "has_error", "created_at")}
+
+
+def _fill_tx_defaults(row: dict) -> dict:
+    """Populate any missing nullable keys with None so the named-bind insert
+    statements don't raise sqlite3.ProgrammingError on legacy callers."""
+    for k, default in _TX_INSERT_NULLABLE_DEFAULTS.items():
+        row.setdefault(k, default)
+    return row
+
+
 def insert_transaction(row: dict) -> None:
-    # Ensure the producer keys exist (older message paths may not set them).
-    row.setdefault("producer_id", None)
-    row.setdefault("producer_name", None)
-    row.setdefault("producer_country", None)
-    row.setdefault("producer_city", None)
+    _fill_tx_defaults(row)
     conn = _connect(EUROPEAN_CUSTOM_DB)
     with conn:
         conn.execute(
-            """
-            INSERT INTO transactions
-            (transaction_id, transaction_date, seller_id, seller_name,
-             seller_country, item_description, item_category,
-             value, vat_rate, vat_amount, buyer_country,
-             correct_vat_rate, has_error, xml_message, created_at,
-             producer_id, producer_name, producer_country, producer_city)
-            VALUES
-            (:transaction_id, :transaction_date, :seller_id, :seller_name,
-             :seller_country, :item_description, :item_category,
-             :value, :vat_rate, :vat_amount, :buyer_country,
-             :correct_vat_rate, :has_error, :xml_message, :created_at,
-             :producer_id, :producer_name, :producer_country, :producer_city)
+            f"""
+            INSERT INTO transactions ({_TX_INSERT_COLS})
+            VALUES ({_TX_INSERT_PLACEHOLDERS})
             ON CONFLICT(transaction_id) DO UPDATE SET
               transaction_date  = excluded.transaction_date,
               seller_name       = excluded.seller_name,
@@ -665,7 +713,16 @@ def insert_transaction(row: dict) -> None:
               producer_id       = excluded.producer_id,
               producer_name     = excluded.producer_name,
               producer_country  = excluded.producer_country,
-              producer_city     = excluded.producer_city
+              producer_city     = excluded.producer_city,
+              vat_subcategory_code              = excluded.vat_subcategory_code,
+              engine_vat_ratio_risk             = excluded.engine_vat_ratio_risk,
+              engine_ml_risk                    = excluded.engine_ml_risk,
+              engine_ml_seller_contribution     = excluded.engine_ml_seller_contribution,
+              engine_ml_origin_contribution     = excluded.engine_ml_origin_contribution,
+              engine_ml_category_contribution   = excluded.engine_ml_category_contribution,
+              engine_ml_destination_contribution= excluded.engine_ml_destination_contribution,
+              engine_vagueness_risk             = excluded.engine_vagueness_risk,
+              engine_ie_watchlist_risk          = excluded.engine_ie_watchlist_risk
             """,
             row,
         )
@@ -673,22 +730,13 @@ def insert_transaction(row: dict) -> None:
 
 
 def bulk_insert(rows: list[dict], path: Path = EUROPEAN_CUSTOM_DB) -> None:
+    rows = [_fill_tx_defaults(r) for r in rows]
     conn = _connect(path)
     with conn:
         conn.executemany(
-            """
-            INSERT OR IGNORE INTO transactions
-            (transaction_id, transaction_date, seller_id, seller_name,
-             seller_country, item_description, item_category,
-             value, vat_rate, vat_amount, buyer_country,
-             correct_vat_rate, has_error, xml_message, created_at,
-             producer_id, producer_name, producer_country, producer_city)
-            VALUES
-            (:transaction_id, :transaction_date, :seller_id, :seller_name,
-             :seller_country, :item_description, :item_category,
-             :value, :vat_rate, :vat_amount, :buyer_country,
-             :correct_vat_rate, :has_error, :xml_message, :created_at,
-             :producer_id, :producer_name, :producer_country, :producer_city)
+            f"""
+            INSERT OR IGNORE INTO transactions ({_TX_INSERT_COLS})
+            VALUES ({_TX_INSERT_PLACEHOLDERS})
             """,
             rows,
         )

@@ -219,6 +219,20 @@ def build_sales_order_event(row: dict) -> dict:
         "producer_name":    producer_name or None,
         "producer_country": producer_country or None,
         "producer_city":    producer_city or None,
+        # New-dataset (Stage 3) per-tx engine inputs. Carried through to
+        # SALES_ORDER_EVENT subscribers so each engine can read its
+        # pre-baked output. Keys mirror the column names on the
+        # transactions table; engines look for the underscore-prefixed
+        # variants below.
+        "vat_subcategory_code":              row.get("vat_subcategory_code"),
+        "_engine_vat_ratio_risk":            row.get("engine_vat_ratio_risk"),
+        "_engine_ml_risk":                   row.get("engine_ml_risk"),
+        "_engine_ml_seller_contribution":    row.get("engine_ml_seller_contribution"),
+        "_engine_ml_origin_contribution":    row.get("engine_ml_origin_contribution"),
+        "_engine_ml_category_contribution":  row.get("engine_ml_category_contribution"),
+        "_engine_ml_destination_contribution":row.get("engine_ml_destination_contribution"),
+        "_engine_vagueness_risk":            row.get("engine_vagueness_risk"),
+        "_engine_ie_watchlist_risk":         row.get("engine_ie_watchlist_risk"),
     }
     return msg
 
