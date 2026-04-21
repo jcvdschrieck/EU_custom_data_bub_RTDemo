@@ -1661,27 +1661,74 @@ def _hydrate_row(r) -> dict:
     return d
 
 
-def get_all_cases_hydrated(status: str | None = None, limit: int = 200) -> list[dict]:
-    """Return cases joined with Sales_Order + Sales_Order_Risk."""
+def get_case_orders(case_id: str) -> list[dict]:
+    """Return all Sales_Order + Sales_Order_Risk rows for a case."""
     conn = _connect(INVESTIGATION_DB)
-    # Oldest cases first (FIFO): operators triage in the order they were opened.
+    rows = conn.execute("""
+        SELECT o.Sales_Order_ID, o.Sales_Order_Business_Key,
+               o.HS_Product_Category, o.Product_Description, o.Product_Value,
+               o.VAT_Rate, o.VAT_Fee, o.Seller_Name,
+               o.Country_Origin, o.Country_Destination,
+               r.Overall_Risk_Score, r.Overall_Risk_Level,
+               r.Seller_Risk_Score, r.Country_Risk_Score,
+               r.Product_Category_Risk_Score, r.Manufacturer_Risk_Score,
+               r.Confidence_Score
+        FROM Sales_Order o
+        LEFT JOIN Sales_Order_Risk r ON o.Sales_Order_Business_Key = r.Sales_Order_Business_Key
+        WHERE o.Case_ID = ?
+        ORDER BY o.Sales_Order_ID
+    """, (case_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def _hydrate_with_orders(r, conn) -> dict:
+    """Hydrate a case row and attach all its orders."""
+    d = _hydrate_row(r)
+    case_id = d.get("Case_ID")
+    if case_id:
+        orders = conn.execute("""
+            SELECT o.Sales_Order_ID, o.Sales_Order_Business_Key,
+                   o.HS_Product_Category, o.Product_Description, o.Product_Value,
+                   o.VAT_Rate, o.VAT_Fee, o.Seller_Name,
+                   o.Country_Origin, o.Country_Destination,
+                   r.Overall_Risk_Score, r.Overall_Risk_Level
+            FROM Sales_Order o
+            LEFT JOIN Sales_Order_Risk r ON o.Sales_Order_Business_Key = r.Sales_Order_Business_Key
+            WHERE o.Case_ID = ?
+            ORDER BY o.Sales_Order_ID
+        """, (case_id,)).fetchall()
+        d["orders"] = [dict(o) for o in orders]
+    else:
+        d["orders"] = []
+    return d
+
+
+def get_all_cases_hydrated(status: str | None = None, limit: int = 200) -> list[dict]:
+    """Return cases joined with Sales_Order + Sales_Order_Risk, with all orders attached."""
+    conn = _connect(INVESTIGATION_DB)
     if status:
         sql = _HYDRATED_CASE_SQL + " WHERE c.Status = ? ORDER BY c.Created_time ASC LIMIT ?"
         rows = conn.execute(sql, (status, limit)).fetchall()
     else:
         sql = _HYDRATED_CASE_SQL + " ORDER BY c.Created_time ASC LIMIT ?"
         rows = conn.execute(sql, (limit,)).fetchall()
+    result = [_hydrate_with_orders(r, conn) for r in rows]
     conn.close()
-    return [_hydrate_row(r) for r in rows]
+    return result
 
 
 def get_case_hydrated(case_id: str) -> dict | None:
-    """Single case joined with Sales_Order + Sales_Order_Risk."""
+    """Single case joined with Sales_Order + Sales_Order_Risk, with all orders attached."""
     conn = _connect(INVESTIGATION_DB)
     sql = _HYDRATED_CASE_SQL + " WHERE c.Case_ID = ? LIMIT 1"
     row = conn.execute(sql, (case_id,)).fetchone()
+    if not row:
+        conn.close()
+        return None
+    result = _hydrate_with_orders(row, conn)
     conn.close()
-    return _hydrate_row(row) if row else None
+    return result
 
 
 # ── Data hub upserts (3 dark-purple tables) ──────────────────────────────────
