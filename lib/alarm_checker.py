@@ -17,9 +17,9 @@ TechZone GmbH (SUP001, DE) → IE is seeded with zero-rate fraud in week 2 of Ma
 This drives the 7-day VAT/value ratio from ~19% to ~0%, far exceeding the 25%
 deviation threshold and triggering an alarm.
 
-Only Ireland-bound transactions are tagged as suspicious (SUSPICIOUS_COUNTRIES).
-Other supplier/country pairs may also trigger the ratio alarm, but only IE
-transactions are pushed to the suspicious transactions queue.
+The check runs for ALL (supplier, buyer_country) pairs — any pair whose
+7-day ratio deviates from its 8-week baseline by more than the threshold
+triggers an alarm. No country filter is applied.
 """
 from __future__ import annotations
 
@@ -28,13 +28,9 @@ from datetime import datetime, timedelta, timezone
 
 from lib.config import EUROPEAN_CUSTOM_DB
 
-MIN_CURRENT_TX    = 3    # minimum transactions needed in the 7-day window
-MIN_HISTORICAL_TX = 5    # minimum transactions needed in the 8-week baseline
-DEVIATION_THRESHOLD = 0.25   # 25 %
-
-# Only transactions destined for these countries are tagged suspicious and
-# forwarded to the agent processing queue.
-SUSPICIOUS_COUNTRIES: set[str] = {"IE"}
+MIN_CURRENT_TX    = 3    # minimum transactions in the 7-day window before the check runs
+MIN_HISTORICAL_TX = 5    # minimum transactions in the 8-week baseline before the check runs
+DEVIATION_THRESHOLD = 0.25   # 25 % — how far the 7-day ratio must deviate from the baseline
 
 
 # ── Internal DB helpers (read from European Custom DB) ────────────────────────
@@ -160,10 +156,6 @@ def check_alarm(tx: dict) -> dict | None:
     tx_date       = tx["transaction_date"]      # ISO string
     tx_id         = tx["transaction_id"]
     alarm_key     = f"{supplier_id}|{buyer_country}"
-
-    # Only raise alarms for SUSPICIOUS_COUNTRIES
-    if buyer_country not in SUSPICIOUS_COUNTRIES:
-        return None
 
     # Parse simulation time
     sim_dt = datetime.fromisoformat(tx_date[:19]).replace(tzinfo=timezone.utc)

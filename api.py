@@ -68,9 +68,9 @@ Message flow (publish-subscribe)
               (30-s polling tick)    line_item_risk +
                                       line_item_ai_analysis
 
-The Customs Officer console (Revenue Guardian /customs page) is master:
+The Customs Officer console (C&T Risk Management System /customs page) is master:
 its release/retain decision is the terminal event. The Tax Officer console
-(Revenue Guardian /tax page) only issues a recommendation that the Customs
+(C&T Risk Management System /tax page) only issues a recommendation that the Customs
 Officer can accept or override (audited via the custom_override flag).
 
 Key endpoints
@@ -121,12 +121,16 @@ from pydantic import BaseModel
 
 from lib.broker import (
     broker,
-    SALES_ORDER_EVENT, RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME,
-    RT_SCORE, ORDER_VALIDATION, ARRIVAL_NOTIFICATION,
-    RELEASE_EVENT, RETAIN_EVENT, INVESTIGATE_EVENT,
-    AGENT_RETAIN_EVENT, AGENT_RELEASE_EVENT, RELEASE_AFTER_INVESTIGATION_EVENT,
-    AI_ANALYSIS_EVENT,
+    SALES_ORDER_EVENT, RT_RISK_OUTCOME, ORDER_VALIDATION,
+    ASSESSMENT_OUTCOME, INVESTIGATION_OUTCOME, CUSTOM_OUTCOME,
+    RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME, RT_RISK_3_OUTCOME, RT_RISK_4_OUTCOME, RT_SCORE,  # legacy counters
+    RELEASE_EVENT, RETAIN_EVENT, INVESTIGATE_EVENT,   # legacy counters
 )
+
+# Total number of risk monitoring engines. The release factory waits
+# for this many outcomes (or times out) before computing the score.
+# Adding a new risk engine = increment this + write the factory.
+TOTAL_RISK_ENGINES = 4
 from lib.config import DEFAULT_SPEED, MIN_SPEED, MAX_SPEED, QUEUE_SIZE
 from lib.database import (
     get_latest_transactions,
@@ -149,11 +153,8 @@ from lib.database import (
     get_ireland_queue,
     get_ireland_case,
     update_suspicion_level,
-    upsert_sales_order_line_item,
-    upsert_line_item_risk,
-    upsert_line_item_ai_analysis,
 )
-from lib.regions import country_region
+# from lib.regions import country_region  # removed with data hub writer
 from lib.simulator import state, simulation_loop
 from lib.catalog import SUPPLIERS, COUNTRY_NAMES
 
@@ -163,11 +164,37 @@ _live_queue:          deque[dict]        = deque(maxlen=QUEUE_SIZE)
 _live_alarms:         list[dict]         = []
 _sse_queues:          set[asyncio.Queue] = set()   # live-transaction stream subscribers
 _sim_state_sse:       set[asyncio.Queue] = set()   # pipeline + status stream subscribers
+_rg_case_sse:         set[asyncio.Queue] = set()   # C&T Risk Management System case stream subscribers
+
+# ── VAT Fraud Detection agent queue ─────────────────────────────────────────
+# Single asyncio queue + single worker. LM Studio serializes inference
+# internally; running >1 worker would just stack up locally with no gain.
+AGENT_WORKERS         = 1
+_agent_queue:         asyncio.Queue[str] | None = None  # case_ids awaiting AI analysis
+_agent_in_progress:   str | None = None                  # case_id currently processing
+
+from lib import case_statuses as STATUS
+
+
+def _push_rg_case_sse(payload: dict) -> None:
+    """Push a case event to all connected C&T Risk Management System SSE clients."""
+    if not _rg_case_sse:
+        return
+    import json as _json
+    data = _json.dumps(payload)
+    dead: set[asyncio.Queue] = set()
+    for q in _rg_case_sse:
+        try:
+            q.put_nowait(data)
+        except asyncio.QueueFull:
+            dead.add(q)
+    _rg_case_sse.difference_update(dead)
+
 
 # ── Two-entity workflow queues ───────────────────────────────────────────────
 #
 # Customs and Tax are modelled as two completely separate offices with their
-# own listener, queue, SSE subscribers and UI page on the revenue-guardian UI.
+# own listener, queue, SSE subscribers and UI page on the C&T Risk Management System UI.
 # They communicate via two well-defined inter-entity transfers:
 #
 #   AMBER  → Tax Office  (initial entry)
@@ -205,12 +232,7 @@ _sim_state_sse:       set[asyncio.Queue] = set()   # pipeline + status stream su
 #     "created_at":               ISO8601,
 #     "updated_at":               ISO8601,
 #   }
-_customs_queue: dict[str, dict] = {}
-_tax_queue:     dict[str, dict] = {}
-_customs_sse:   set[asyncio.Queue] = set()
-_tax_sse:       set[asyncio.Queue] = set()
-
-_manual_agent_executor = None   # lazy-initialised ThreadPoolExecutor for manual agent runs
+# (C&T Risk Management System queues + SSE sets removed)
 
 # Registry of in-flight delayed factory tasks (Order Validation + Arrival
 # Notification + manual agent runs). Each factory adds its newly-created task
@@ -275,7 +297,11 @@ async def _RT_risk_monitoring_1_factory() -> None:
     """
     Subscriber of Sales-order Event Broker.
     Runs the VAT/value ratio deviation check (7-day vs 8-week baseline).
-    Publishes outcome to RT_risk_monitoring_1_outcome_broker.
+    Publishes to the unified RT_RISK_OUTCOME topic with engine="vat_ratio".
+
+    Primary signal: `risk` in [0, 1]. Binary for now (1.0 when suspicious,
+    0.0 otherwise); could scale with deviation_pct later. `flagged` is
+    derived for legacy counter compatibility.
     """
     from lib.alarm_checker import check_alarm
 
@@ -285,106 +311,231 @@ async def _RT_risk_monitoring_1_factory() -> None:
 
         result = check_alarm(tx)   # None | {"suspicious", "alarm_id", "new_alarm"}
 
-        flagged   = bool(result and result.get("suspicious"))
-        alarm_id  = result.get("alarm_id")  if result else None
-        new_alarm = result.get("new_alarm") if result else None
+        suspicious = bool(result and result.get("suspicious"))
+        risk       = 1.0 if suspicious else 0.0
+        flagged    = risk >= 0.5
+        alarm_id   = result.get("alarm_id")  if result else None
+        new_alarm  = result.get("new_alarm") if result else None
 
         if new_alarm:
             _live_alarms.insert(0, new_alarm)
 
         expire_old_alarms(tx["transaction_date"][:19])
 
-        await broker.publish(RT_RISK_1_OUTCOME, {
-            "tx":       tx,
-            "flagged":  flagged,
-            "alarm_id": alarm_id,
-            "alarm":    new_alarm or next(
+        await broker.publish(RT_RISK_OUTCOME, {
+            "engine":     "vat_ratio",
+            "order_id":   tx["transaction_id"],
+            "risk":       risk,
+            "applicable": True,
+            "alarm_id":   alarm_id,
+            "alarm":      new_alarm or next(
                 (a for a in _live_alarms if a.get("id") == alarm_id), {}
             ) if flagged else None,
         })
+        # Legacy counter
+        await broker.publish(RT_RISK_1_OUTCOME, {"order_id": tx["transaction_id"], "risk": risk, "flagged": flagged})
 
 
-# ── RT Risk Monitoring 2 Factory (watchlist check) ───────────────────────────
+# ── RT Risk Monitoring 2 Factory (ML watchlist — 4-tuple + per-dim weights) ──
+
+# Overall-risk threshold above which the engine flags the transaction.
+ML_RISK_FLAG_THRESHOLD = 0.5
+
 
 async def _RT_risk_monitoring_2_factory() -> None:
     """
     Subscriber of Sales-order Event Broker.
-    Checks whether the (seller_id, seller_country) pair — supplier × country
-    of origin — appears in the configured watchlist (lib/watchlist.py).
-    Publishes outcome to RT_risk_monitoring_2_outcome_broker.
+
+    Replaces the old supplier × country watchlist with a richer rule set
+    (see ml_risk_rules in european_custom.db, seeded from Fake ML.xlsx).
+    Each rule keys on the 4-tuple
+        (seller, country_origin, vat_product_category, country_destination)
+    and carries an overall risk score plus four per-dimension weights.
+
+    Outcome payload — if the 4-tuple matches a rule:
+        flagged = (risk >= ML_RISK_FLAG_THRESHOLD)
+        risk = rule.risk (0-1)
+        seller_risk / country_risk / product_category_risk / destination_risk
+        (the four weighted sub-scores from the rule; propagated via the
+        release factory into Sales_Order_Risk at case creation)
+
+    Otherwise:  flagged=False, no per-dimension scores attached.
     """
-    from lib.watchlist import is_watchlisted
+    from lib.database import lookup_ml_risk_rule
 
     q = broker.subscribe(SALES_ORDER_EVENT)
     while True:
         tx = await q.get()
 
-        flagged = is_watchlisted(tx["seller_id"], tx["seller_country"])
+        rule = lookup_ml_risk_rule(
+            seller               = tx.get("seller_name", ""),
+            country_origin       = tx.get("seller_country", ""),
+            vat_product_category = tx.get("item_category", ""),
+            country_destination  = tx.get("buyer_country", ""),
+        )
 
-        await broker.publish(RT_RISK_2_OUTCOME, {
-            "tx":      tx,
-            "flagged": flagged,
-            "reason":  "watchlist_match" if flagged else "clear",
-        })
-
-
-# ── RT Consolidation Factory ──────────────────────────────────────────────────
-
-async def _RT_consolidation_factory() -> None:
-    """
-    Subscribes to RT_risk_monitoring_1_outcome_broker AND
-    RT_risk_monitoring_2_outcome_broker.
-    Correlates both outcomes by transaction_id and computes a risk score:
-      • both flagged  → RED
-      • one flagged   → AMBER
-      • neither       → GREEN
-    Publishes to RT_score_broker.
-    """
-    _buffer: dict[str, dict] = {}   # tx_id → {"r1": ..., "r2": ...}
-
-    async def _emit_if_ready(tx_id: str) -> None:
-        entry = _buffer.get(tx_id, {})
-        if "r1" not in entry or "r2" not in entry:
-            return
-        del _buffer[tx_id]
-
-        r1, r2   = entry["r1"], entry["r2"]
-        flag_1   = r1["flagged"]
-        flag_2   = r2["flagged"]
-
-        if flag_1 and flag_2:
-            risk_score = "red"
-        elif flag_1 or flag_2:
-            risk_score = "amber"
+        if rule is None:
+            risk    = 0.0
+            flagged = False
+            payload: dict = {
+                "engine":     "watchlist",
+                "order_id":   tx["transaction_id"],
+                "risk":       risk,
+                "applicable": True,
+                "reason":     "clear",
+            }
         else:
-            risk_score = "green"
+            risk    = float(rule.get("risk", 0.0) or 0.0)
+            flagged = risk >= ML_RISK_FLAG_THRESHOLD
+            payload = {
+                "engine":        "watchlist",
+                "order_id":      tx["transaction_id"],
+                "risk":          risk,
+                "applicable":    True,
+                "reason":        "ml_watchlist_match" if flagged else "ml_watchlist_low_risk",
+                "description":   rule.get("description"),
+                # Per-dimension weighted sub-scores — propagated into
+                # ASSESSMENT_OUTCOME by the release factory, then written
+                # onto Sales_Order_Risk by the C&T factory.
+                "seller_risk":               rule.get("seller_weight"),
+                "country_risk":              rule.get("country_origin_weight"),
+                "product_category_risk":     rule.get("vat_product_category_weight"),
+                "destination_risk":          rule.get("country_destination_weight"),
+            }
 
-        await broker.publish(RT_SCORE, {
-            "tx":             r1["tx"],
-            "risk_score":     risk_score,
-            "risk_1_flagged": flag_1,
-            "risk_2_flagged": flag_2,
-            "alarm_id":       r1.get("alarm_id"),
-            "alarm":          r1.get("alarm"),
+        await broker.publish(RT_RISK_OUTCOME, payload)
+        # Legacy counter
+        await broker.publish(RT_RISK_2_OUTCOME, {"order_id": tx["transaction_id"], "risk": risk, "flagged": flagged})
+
+
+# ── RT Risk Monitoring 3 Factory (Ireland-specific watchlist) ───────────────
+#
+# Hosted (in real life) on a server managed by the Irish authority. This
+# factory subscribes to SALES_ORDER_EVENT but only PROCESSES events whose
+# country of destination is "IE" — events for other destinations are
+# silently dropped (no publish at all). Adds a uniform 1–5 s latency to
+# simulate the round-trip to the remote server.
+#
+# Watchlist is intentionally empty for now — fill IE_WATCHLIST below to
+# start flagging matches.
+
+import random as _random
+
+# Watchlist of (seller_id, seller_country) tuples that the Irish authority
+# has flagged. Empty by design — nothing is currently flagged.
+IE_WATCHLIST: set[tuple[str, str]] = set()
+
+
+async def _RT_risk_monitoring_3_factory() -> None:
+    """
+    Subscriber of Sales-order Event Broker, country-specific (IE).
+
+    For each event:
+      - if Country_Destination != "IE" → drop silently (engine doesn't apply)
+      - otherwise: sleep uniform(1, 5) s, run the IE_WATCHLIST check,
+        publish to RT_RISK_OUTCOME with engine="ireland_watchlist".
+
+    Because the latency can exceed ASSESSMENT_TIMER_S (3 s by design),
+    some IE outcomes legitimately arrive too late to influence the
+    Release Factory's consolidation. That is the intended behaviour.
+    """
+    q = broker.subscribe(SALES_ORDER_EVENT)
+    while True:
+        tx = await q.get()
+        if (tx.get("buyer_country") or "").upper() != "IE":
+            await broker.publish(RT_RISK_OUTCOME, {
+                "engine":     "ireland_watchlist",
+                "order_id":   tx["transaction_id"],
+                "risk":       0.0,
+                "applicable": False,
+                "reason":     "not_applicable",
+            })
+            continue
+
+        async def _process(tx=tx):
+            await asyncio.sleep(_random.uniform(1.0, 5.0))
+            seller_id      = tx.get("seller_id", "")
+            seller_country = (tx.get("seller_country") or "").upper()
+            matched = (seller_id, seller_country) in IE_WATCHLIST
+            risk    = 1.0 if matched else 0.0
+            await broker.publish(RT_RISK_OUTCOME, {
+                "engine":     "ireland_watchlist",
+                "order_id":   tx["transaction_id"],
+                "risk":       risk,
+                "applicable": True,
+                "reason":     "ie_watchlist_match" if risk >= 0.5 else "clear",
+            })
+            await broker.publish(RT_RISK_3_OUTCOME, {"order_id": tx["transaction_id"], "risk": risk, "flagged": risk >= 0.5})
+
+        asyncio.create_task(_process())
+
+
+# ── RT Risk Monitoring 4 Factory (Description Vagueness) ─────────────────────
+#
+# Scores how vague/generic the product description is. Uses sentence
+# embeddings (all-MiniLM-L6-v2) and cosine similarity to a set of vague
+# anchor texts. Higher similarity → higher risk (the description says
+# almost nothing useful for classification).
+
+_vagueness_model = None
+_vague_anchor_embedding = None
+
+def _get_vagueness_model():
+    global _vagueness_model, _vague_anchor_embedding
+    if _vagueness_model is None:
+        from sentence_transformers import SentenceTransformer
+        _vagueness_model = SentenceTransformer("all-MiniLM-L6-v2")
+        vague_anchors = [
+            "general goods", "miscellaneous items", "various products",
+            "stuff", "goods", "items", "products", "materials",
+            "other", "mixed", "assorted", "sample", "test",
+        ]
+        embs = _vagueness_model.encode(vague_anchors, normalize_embeddings=True)
+        _vague_anchor_embedding = embs.mean(axis=0)
+        _vague_anchor_embedding /= (_vague_anchor_embedding ** 2).sum() ** 0.5
+    return _vagueness_model, _vague_anchor_embedding
+
+
+async def _RT_risk_monitoring_4_factory() -> None:
+    """
+    Subscriber of Sales-order Event Broker.
+
+    Scores each product description on a vagueness scale [0, 1]:
+      0.0 = specific, detailed description
+      1.0 = maximally vague / generic
+
+    Uses cosine similarity between the description embedding and a
+    pre-computed "vague text" anchor embedding. The raw similarity
+    (typically 0.1–0.8) is clamped to [0, 1] and used as the risk score.
+    Flagged when risk >= 0.5.
+    """
+    q = broker.subscribe(SALES_ORDER_EVENT)
+    while True:
+        tx = await q.get()
+        description = (tx.get("item_description") or tx.get("product_description") or "").strip()
+
+        if not description:
+            risk = 1.0
+        else:
+            model, anchor = _get_vagueness_model()
+            emb = model.encode([description], normalize_embeddings=True)[0]
+            similarity = float((emb * anchor).sum())
+            risk = max(0.0, min(1.0, similarity))
+
+        flagged = risk >= 0.5
+
+        await broker.publish(RT_RISK_OUTCOME, {
+            "engine":     "description_vagueness",
+            "order_id":   tx["transaction_id"],
+            "risk":       risk,
+            "applicable": True,
+            "reason":     "vague_description" if risk >= 0.5 else "clear",
         })
+        await broker.publish(RT_RISK_4_OUTCOME, {"order_id": tx["transaction_id"], "risk": risk, "flagged": flagged})
 
-    async def _drain_r1() -> None:
-        q = broker.subscribe(RT_RISK_1_OUTCOME)
-        while True:
-            item = await q.get()
-            tx_id = item["tx"]["transaction_id"]
-            _buffer.setdefault(tx_id, {})["r1"] = item
-            await _emit_if_ready(tx_id)
 
-    async def _drain_r2() -> None:
-        q = broker.subscribe(RT_RISK_2_OUTCOME)
-        while True:
-            item = await q.get()
-            tx_id = item["tx"]["transaction_id"]
-            _buffer.setdefault(tx_id, {})["r2"] = item
-            await _emit_if_ready(tx_id)
-
-    await asyncio.gather(_drain_r1(), _drain_r2())
+# ── (RT Consolidation Factory removed — its logic is now inside
+# _release_factory which subscribes to RT_RISK_OUTCOME directly.) ──
 
 
 # ── Order Validation Factory ──────────────────────────────────────────────────
@@ -433,785 +584,548 @@ async def _order_validation_factory() -> None:
         _track_factory_task(_validate(tx))
 
 
-# ── Arrival Notification Factory ─────────────────────────────────────────────
+# ── (Arrival Notification Factory removed — Goods Transport flow eliminated.) ──
 
-async def _arrival_notification_factory() -> None:
+
+# ── Release Factory (unified routing: consolidation + release/retain/investigate) ─
+#
+# Replaces the old RT Consolidation Factory + three separate routing factories.
+# Subscribes to:
+#   - RT_RISK_OUTCOME (all risk engines publish here with an "engine" field)
+#   - ORDER_VALIDATION
+#   - ARRIVAL_NOTIFICATION
+#
+# For each transaction, collects risk outcomes and computes:
+#   - risk_score  = flagged_count / total_outcomes (50% if no outcomes)
+#   - confidence  = outcomes_received / TOTAL_RISK_ENGINES (0%, 50%, 100%)
+#   - route:  score < 33.33% → release
+#             33.33% ≤ score ≤ 66.66% → investigate
+#             score > 66.66% → retain
+#
+# GREEN path (release) additionally requires validation + arrival notification.
+# RED path (retain) fires immediately once the score exceeds 66.66%.
+# AMBER path (investigate) requires validation before dispatch.
+
+THRESHOLD_RELEASE    = 1.0 / 3.0   # < 33.33% → release
+THRESHOLD_RETAIN     = 2.0 / 3.0   # > 66.66% → retain
+ASSESSMENT_TIMER_S   = 3.0         # seconds after validation before forced publish
+
+
+def case_risk_level(score: float) -> str:
+    """Compute Low/Medium/High for a case-level risk score.
+
+    Only investigate-routed transactions (score in [THRESHOLD_RELEASE,
+    THRESHOLD_RETAIN]) become cases. The Low/Medium/High classification
+    maps the score within that interval using the same 1/3 and 2/3
+    percentile boundaries, so the labels adapt if the thresholds change.
+
+      Low:    score < THRESHOLD_RELEASE + interval × 1/3
+      Medium: score < THRESHOLD_RELEASE + interval × 2/3
+      High:   score >= THRESHOLD_RELEASE + interval × 2/3
     """
-    Subscribes to Sales-order Event Broker.
-    For each sales order, spawns an independent asyncio task that waits an
-    exponentially-distributed delay (mean 30 sim-seconds) before publishing
-    to ARRIVAL_NOTIFICATION. The wait is expressed in sim-time via
-    _sleep_until_sim_time so arrivals stay tightly coupled to their orders
-    in sim-time and naturally pause/resume/reset alongside the simulation.
-
-    Unlimited concurrency — each order is scheduled independently; no order
-    ever blocks behind another in this factory.
-    """
-    import random
-    from lib.message_factory import build_arrival_notification
-    from lib.simulator import state as _state
-
-    MEAN_SIM_SECONDS = 30.0
-
-    async def _schedule(tx: dict) -> None:
-        sim_delay = random.expovariate(1.0 / MEAN_SIM_SECONDS)
-        target    = _state.sim_time + timedelta(seconds=sim_delay)
-        await _sleep_until_sim_time(target)
-        payload = build_arrival_notification(tx, _state.sim_time)
-        await broker.publish(ARRIVAL_NOTIFICATION, payload)
-
-    q = broker.subscribe(SALES_ORDER_EVENT)
-    while True:
-        tx = await q.get()
-        _track_factory_task(_schedule(tx))
-
-
-# ── Release Factory (GREEN path) ─────────────────────────────────────────────
+    interval = THRESHOLD_RETAIN - THRESHOLD_RELEASE
+    low_high_boundary = THRESHOLD_RELEASE + interval * (1.0 / 3.0)
+    medium_high_boundary = THRESHOLD_RELEASE + interval * (2.0 / 3.0)
+    if score >= medium_high_boundary:
+        return "High"
+    if score >= low_high_boundary:
+        return "Medium"
+    return "Low"
 
 async def _release_factory() -> None:
-    """
-    GREEN path: validation + green RT score + arrival notification → RELEASE_EVENT.
-    Non-green scores are ignored (handled by _retain_factory / _investigate_dispatch_factory).
-    """
+    """Automated Assessment Factory.
+
+    Collects risk outcomes + validation for each transaction. Once
+    validation arrives, a 3-second timer starts. The assessment is
+    published either:
+      (a) immediately, if all TOTAL_RISK_ENGINES outcomes arrive
+          before the timer fires, OR
+      (b) when the timer fires, with whatever risk info is available
+          at that point.
+
+    Once published, the transaction is marked "routed" and any late
+    risk outcomes are discarded."""
+
+    # Per-transaction buffer: tx_id → {
+    #   "risk_outcomes": {engine_name: item, ...},
+    #   "validation": item | None,
+    #   "routed": bool,
+    #   "timer_task": asyncio.Task | None,
+    # }
     _buffer: dict[str, dict] = {}
-    _skip:   set[str]        = set()
 
-    async def _emit_if_ready(tx_id: str) -> None:
-        entry = _buffer.get(tx_id, {})
-        if "validation" not in entry or "score" not in entry or "arrival" not in entry:
-            return
-        del _buffer[tx_id]
-        _skip.discard(tx_id)
-        val, score = entry["validation"], entry["score"]
-        await broker.publish(RELEASE_EVENT, {
-            "tx":                val["tx"],
-            "validated":         val["validated"],
-            "validation_errors": val["validation_errors"],
-            "risk_score":        score["risk_score"],
-            "risk_1_flagged":    score["risk_1_flagged"],
-            "risk_2_flagged":    score["risk_2_flagged"],
-            "alarm_id":          score["alarm_id"],
-            "alarm":             score["alarm"],
+    def _get(tx_id: str) -> dict:
+        return _buffer.setdefault(tx_id, {
+            "risk_outcomes": {},
+            "validation": None,
+            "routed": False,
+            "timer_task": None,
         })
 
-    async def _drain_validation() -> None:
-        q = broker.subscribe(ORDER_VALIDATION)
-        while True:
-            item = await q.get()
-            tx_id = item["tx"]["transaction_id"]
-            if tx_id not in _skip:
-                _buffer.setdefault(tx_id, {})["validation"] = item
-                await _emit_if_ready(tx_id)
+    def _compute_score(entry: dict) -> tuple[float, float, str]:
+        """Return (score, confidence, route).
 
-    async def _drain_score() -> None:
-        q = broker.subscribe(RT_SCORE)
-        while True:
-            item = await q.get()
-            tx_id = item["tx"]["transaction_id"]
-            if item["risk_score"] == "green":
-                _buffer.setdefault(tx_id, {})["score"] = item
-                await _emit_if_ready(tx_id)
-            else:
-                _skip.add(tx_id)
-                _buffer.pop(tx_id, None)
+        Score is the average of per-engine `risk` values for applicable
+        engines only. Non-applicable engines (e.g. IE watchlist for a
+        non-IE transaction) are excluded from both numerator and denominator.
 
-    async def _drain_arrival() -> None:
-        q = broker.subscribe(ARRIVAL_NOTIFICATION)
-        while True:
-            item = await q.get()
-            tx_id = (
-                item.get("orderIdentifier")
-                or item.get("transaction_id")
-                or item.get("sales_order_id")
-                or ((item.get("HouseConsignment") or {}).get("Order") or {}).get("orderIdentifier")
-            )
-            if tx_id and tx_id not in _skip:
-                _buffer.setdefault(tx_id, {})["arrival"] = item
-                await _emit_if_ready(tx_id)
+        Confidence = applicable engines received / total applicable engines
+        expected. An engine that self-reports applicable=False counts toward
+        "received" (we know its status) but not toward the score or the
+        expected count.
+        """
+        outcomes = entry["risk_outcomes"]
 
-    await asyncio.gather(_drain_validation(), _drain_score(), _drain_arrival())
+        applicable = {eng: o for eng, o in outcomes.items()
+                      if o.get("applicable", True)}
+        n_applicable = len(applicable)
+        n_not_applicable = sum(1 for o in outcomes.values()
+                               if not o.get("applicable", True))
+        n_expected = TOTAL_RISK_ENGINES - n_not_applicable
+        confidence = n_applicable / n_expected if n_expected > 0 else 0
 
+        if n_applicable == 0:
+            score = 0.5
+        else:
+            risks = [float(o.get("risk", 0.0) or 0.0) for o in applicable.values()]
+            score = sum(risks) / n_applicable
 
-# ── Retain Factory (RED path — immediate) ────────────────────────────────────
+        if score > THRESHOLD_RETAIN:
+            route = "red"
+        elif score >= THRESHOLD_RELEASE:
+            route = "amber"
+        else:
+            route = "green"
 
-async def _retain_factory() -> None:
-    """
-    RED path: red RT score → RETAIN_EVENT immediately, no other conditions needed.
-    """
-    q = broker.subscribe(RT_SCORE)
-    while True:
-        item = await q.get()
-        if item["risk_score"] != "red":
-            continue
-        tx = item["tx"]
-        await broker.publish(RETAIN_EVENT, {
-            "tx":             tx,
-            "risk_score":     "red",
-            "risk_1_flagged": item["risk_1_flagged"],
-            "risk_2_flagged": item["risk_2_flagged"],
-            "alarm_id":       item["alarm_id"],
-            "alarm":          item["alarm"],
-        })
+        return score, confidence, route
 
-
-# ── Investigate Dispatch Factory (AMBER path) ─────────────────────────────────
-
-async def _investigate_dispatch_factory() -> None:
-    """
-    AMBER path: amber RT score + order validation → INVESTIGATE_EVENT.
-    Non-amber scores are discarded immediately.
-    """
-    _buffer: dict[str, dict] = {}
-    _skip:   set[str]        = set()
-
-    async def _emit_if_ready(tx_id: str) -> None:
-        entry = _buffer.get(tx_id, {})
-        if "validation" not in entry or "score" not in entry:
+    async def _publish_assessment(tx_id: str) -> None:
+        """Publish the assessment outcome for a transaction using
+        whatever risk info is available now."""
+        entry = _buffer.get(tx_id)
+        if entry is None or entry["routed"]:
             return
-        del _buffer[tx_id]
-        _skip.discard(tx_id)
-        val, score = entry["validation"], entry["score"]
-        await broker.publish(INVESTIGATE_EVENT, {
-            "tx":                val["tx"],
-            "validated":         val["validated"],
-            "validation_errors": val["validation_errors"],
-            "risk_score":        "amber",
-            "alarm_id":          score["alarm_id"],
-            "alarm":             score["alarm"],
-        })
+        if entry["validation"] is None:
+            return   # should not happen — timer starts after validation
 
-    async def _drain_validation() -> None:
-        q = broker.subscribe(ORDER_VALIDATION)
-        while True:
-            item = await q.get()
-            tx_id = item["tx"]["transaction_id"]
-            if tx_id not in _skip:
-                _buffer.setdefault(tx_id, {})["validation"] = item
-                await _emit_if_ready(tx_id)
+        entry["routed"] = True
+        # Cancel the timer if it hasn't fired yet
+        timer = entry.get("timer_task")
+        if timer and not timer.done():
+            timer.cancel()
 
-    async def _drain_score() -> None:
-        q = broker.subscribe(RT_SCORE)
-        while True:
-            item = await q.get()
-            tx_id = item["tx"]["transaction_id"]
-            if item["risk_score"] == "amber":
-                _buffer.setdefault(tx_id, {})["score"] = item
-                await _emit_if_ready(tx_id)
-            else:
-                _skip.add(tx_id)
-                _buffer.pop(tx_id, None)
-
-    await asyncio.gather(_drain_validation(), _drain_score())
-
-
-# ── Two-entity manual workflow (Customs Office + Tax Office) ─────────────────
-#
-# Two independent listeners — one per entity. Each listener subscribes to its
-# own broker topic and populates its own in-memory queue. Inter-entity
-# transfers (Customs escalates → Tax, Tax recommends → Customs) physically
-# move the entry between dicts and broadcast updates on BOTH SSE streams so
-# both UIs refresh simultaneously.
-
-def _flat_tx_view(tx: dict) -> dict:
-    """Common transaction-shaped fields surfaced on every queue entry view.
-    Used by both _customs_entry_view and _tax_entry_view."""
-    return {
-        "transaction_id":   tx.get("transaction_id"),
-        "transaction_date": tx.get("transaction_date"),
-        "seller_id":        tx.get("seller_id"),
-        "seller_name":      tx.get("seller_name"),
-        "seller_country":   tx.get("seller_country"),
-        "buyer_country":    tx.get("buyer_country"),
-        "item_category":    tx.get("item_category"),
-        "item_description": tx.get("item_description"),
-        "value":            tx.get("value"),
-        "vat_rate":         tx.get("vat_rate"),
-        "vat_amount":       tx.get("vat_amount"),
-        "correct_vat_rate": tx.get("correct_vat_rate"),
-        "has_error":        tx.get("has_error"),
-        "producer_id":      tx.get("producer_id"),
-        "producer_name":    tx.get("producer_name"),
-        "producer_country": tx.get("producer_country"),
-        "producer_city":    tx.get("producer_city"),
-    }
-
-
-def _customs_entry_view(entry: dict) -> dict:
-    return {
-        **_flat_tx_view(entry.get("tx", {}) or {}),
-        "risk_score":          entry.get("risk_score"),
-        "alarm":               entry.get("alarm") or {},
-        "route":               entry.get("route"),
-        "tax_recommendation":  entry.get("tax_recommendation"),
-        "tax_recommended_at":  entry.get("tax_recommended_at"),
-        "created_at":          entry.get("created_at"),
-        "updated_at":          entry.get("updated_at"),
-    }
-
-
-def _tax_entry_view(entry: dict) -> dict:
-    return {
-        **_flat_tx_view(entry.get("tx", {}) or {}),
-        "risk_score":             entry.get("risk_score"),
-        "alarm":                  entry.get("alarm") or {},
-        "route":                  entry.get("route"),
-        "escalated_from_customs": bool(entry.get("escalated_from_customs")),
-        "agent_status":           entry.get("agent_status") or "pending",
-        "agent_verdict":          entry.get("agent_verdict"),
-        "created_at":             entry.get("created_at"),
-        "updated_at":             entry.get("updated_at"),
-    }
-
-
-def _customs_snapshot() -> list[dict]:
-    items = [_customs_entry_view(e) for e in _customs_queue.values()]
-    items.sort(key=lambda x: x.get("created_at") or "", reverse=True)
-    return items
-
-
-def _tax_snapshot() -> list[dict]:
-    items = [_tax_entry_view(e) for e in _tax_queue.values()]
-    items.sort(key=lambda x: x.get("created_at") or "", reverse=True)
-    return items
-
-
-def _broadcast_to(sse_set: set[asyncio.Queue], payload_str: str) -> None:
-    """Synchronous fan-out via put_nowait. Drops frames for lagging subscribers."""
-    if not sse_set:
-        return
-    dead = set()
-    for q in sse_set:
-        try:
-            q.put_nowait(payload_str)
-        except asyncio.QueueFull:
-            pass   # subscriber lagging; next change will produce another snapshot
-        except Exception:
-            dead.add(q)
-    sse_set.difference_update(dead)
-
-
-def _broadcast_customs_update() -> None:
-    if not _customs_sse:
-        return
-    try:
-        payload = _json.dumps(_customs_snapshot())
-    except Exception:
-        return
-    _broadcast_to(_customs_sse, payload)
-
-
-def _broadcast_tax_update() -> None:
-    if not _tax_sse:
-        return
-    try:
-        payload = _json.dumps(_tax_snapshot())
-    except Exception:
-        return
-    _broadcast_to(_tax_sse, payload)
-
-
-async def _customs_listener_factory() -> None:
-    """
-    Customs Office listener.
-
-    Subscribes to RETAIN_EVENT (the RED routing path). Every retain event
-    becomes an entry in _customs_queue with route="red", awaiting the
-    Customs operator's review on the Revenue Guardian Customs page.
-
-    The Customs operator can:
-      - Decide release/retain directly (terminal)
-      - Escalate to Tax (transfer entry to _tax_queue)
-    """
-    q = broker.subscribe(RETAIN_EVENT)
-    while True:
-        msg   = await q.get()
-        tx    = msg.get("tx") or {}
-        tx_id = tx.get("transaction_id")
-        if not tx_id:
-            continue
-        if tx_id in _customs_queue or tx_id in _tax_queue:
-            # Idempotent: don't double-route the same transaction.
-            continue
-        now_iso = datetime.now(timezone.utc).isoformat()
-        _customs_queue[tx_id] = {
-            "tx":                  tx,
-            "alarm":               msg.get("alarm") or {},
-            "risk_score":          msg.get("risk_score") or "red",
-            "route":               "red",
-            "tax_recommendation":  None,
-            "tax_recommended_at":  None,
-            "created_at":          now_iso,
-            "updated_at":          now_iso,
-        }
-        _broadcast_customs_update()
-
-
-async def _tax_listener_factory() -> None:
-    """
-    Tax Office listener.
-
-    Subscribes to INVESTIGATE_EVENT (the AMBER routing path). Every
-    investigate event becomes an entry in _tax_queue with route="amber",
-    awaiting the Tax operator's review on the Revenue Guardian Tax page.
-
-    The Tax operator can:
-      - Run the VAT fraud detection agent (Tax-side tool only)
-      - Recommend release/retain (transfer entry back to _customs_queue
-        with tax_recommendation set; Customs takes the final decision)
-    """
-    q = broker.subscribe(INVESTIGATE_EVENT)
-    while True:
-        msg   = await q.get()
-        tx    = msg.get("tx") or {}
-        tx_id = tx.get("transaction_id")
-        if not tx_id:
-            continue
-        if tx_id in _customs_queue or tx_id in _tax_queue:
-            continue
-        now_iso = datetime.now(timezone.utc).isoformat()
-        _tax_queue[tx_id] = {
-            "tx":                     tx,
-            "alarm":                  msg.get("alarm") or {},
-            "risk_score":             msg.get("risk_score") or "amber",
-            "route":                  "amber",
-            "escalated_from_customs": False,
-            "agent_status":           "pending",
-            "agent_verdict":          None,
-            "created_at":             now_iso,
-            "updated_at":             now_iso,
-        }
-        _broadcast_tax_update()
-
-
-# ── Release After Investigation Factory ──────────────────────────────────────
-
-async def _release_after_investigation_factory() -> None:
-    """
-    Subscribes to AGENT_RELEASE_EVENT, ORDER_VALIDATION, ARRIVAL_NOTIFICATION.
-    Correlates all three by order identifier → RELEASE_AFTER_INVESTIGATION_EVENT.
-
-    Validation and arrival typically arrive well before the agent verdict, so
-    they are pre-buffered and matched when AGENT_RELEASE_EVENT eventually arrives.
-    """
-    _buffer:          dict[str, dict] = {}
-    _pre_validation:  dict[str, dict] = {}
-    _pre_arrival:     dict[str, dict] = {}
-
-    async def _emit_if_ready(tx_id: str) -> None:
-        entry = _buffer.get(tx_id, {})
-        if "agent_release" not in entry or "validation" not in entry or "arrival" not in entry:
-            return
-        del _buffer[tx_id]
-        ar  = entry["agent_release"]
+        score, confidence, route = _compute_score(entry)
+        outcomes = entry["risk_outcomes"]
         val = entry["validation"]
-        await broker.publish(RELEASE_AFTER_INVESTIGATION_EVENT, {
-            "tx":         ar["tx"],
-            "verdict":    ar.get("verdict"),
-            "reasoning":  ar.get("reasoning"),
-            "validated":  val["validated"],
-            "risk_score": "cleared",
+        import uuid
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        so_bk = f"{tx_id}-001"  # business key
+        risk_id = f"RISK-{uuid.uuid4().hex[:12].upper()}"
+
+        route_label = {"red": "retain", "amber": "investigate", "green": "release"}[route]
+
+        # Build per-engine outcome dict: engine_name → outcome fields
+        # (strip order_id since it's already at the top level)
+        engine_outcomes = {}
+        for eng, o in outcomes.items():
+            entry_out = {k: v for k, v in o.items() if k not in ("order_id",)}
+            engine_outcomes[eng] = entry_out
+
+        payload = {
+            "order_id":                    tx_id,
+            "Sales_Order_ID":              tx_id,
+            "Sales_Order_Business_Key":    so_bk,
+            "route":                       route_label,
+            "validated":                   val["validated"],
+            "validation_errors":           val["validation_errors"],
+            # Risk assessment fields
+            "Sales_Order_Risk_ID":         risk_id,
+            "Risk_Type":                   "VAT",
+            "Overall_Risk_Score":          round(score, 4),
+            "Overall_Risk_Level":          route,
+            "Confidence_Score":            round(confidence, 2),
+            "Proposed_Risk_Action":        route_label,
+            "engine_outcomes":             engine_outcomes,
+            "Update_time":                 now_iso,
+        }
+
+        # Legacy RT_SCORE event for pipeline counter compatibility
+        await broker.publish(RT_SCORE, {
+            "order_id":      tx_id,
+            "risk_score":    route,
         })
 
-    async def _drain_agent_release() -> None:
-        q = broker.subscribe(AGENT_RELEASE_EVENT)
-        while True:
-            item  = await q.get()
-            tx_id = item["tx"]["transaction_id"]
-            _buffer[tx_id] = {"agent_release": item}
-            if tx_id in _pre_validation:
-                _buffer[tx_id]["validation"] = _pre_validation.pop(tx_id)
-            if tx_id in _pre_arrival:
-                _buffer[tx_id]["arrival"] = _pre_arrival.pop(tx_id)
-            await _emit_if_ready(tx_id)
+        await broker.publish(ASSESSMENT_OUTCOME, payload)
 
+        # Legacy counter
+        legacy_topic = {
+            "retain": RETAIN_EVENT,
+            "investigate": INVESTIGATE_EVENT,
+            "release": RELEASE_EVENT,
+        }[route_label]
+        await broker.publish(legacy_topic, payload)
+
+        _buffer.pop(tx_id, None)
+
+    async def _timer_callback(tx_id: str) -> None:
+        """Fires ASSESSMENT_TIMER_S seconds after validation. Publishes
+        the assessment with whatever risk info has accumulated."""
+        try:
+            await asyncio.sleep(ASSESSMENT_TIMER_S)
+            await _publish_assessment(tx_id)
+        except asyncio.CancelledError:
+            pass  # timer cancelled because all risk outcomes arrived early
+
+    def _start_timer(tx_id: str) -> None:
+        """Start the assessment timer for a transaction."""
+        entry = _get(tx_id)
+        if entry["timer_task"] is None and not entry["routed"]:
+            entry["timer_task"] = asyncio.create_task(_timer_callback(tx_id))
+
+    async def _try_early_publish(tx_id: str) -> None:
+        """Check if all risk outcomes have arrived. If so, publish
+        immediately (cancelling the timer)."""
+        entry = _get(tx_id)
+        if entry["routed"] or entry["validation"] is None:
+            return
+        if len(entry["risk_outcomes"]) >= TOTAL_RISK_ENGINES:
+            await _publish_assessment(tx_id)
+
+    # ── Drain: risk outcomes ──
+    async def _drain_risk() -> None:
+        q = broker.subscribe(RT_RISK_OUTCOME)
+        while True:
+            item = await q.get()
+            tx_id = item["order_id"]
+            entry = _get(tx_id)
+            if entry["routed"]:
+                continue   # late arrival — discard
+            engine = item.get("engine", "unknown")
+            entry["risk_outcomes"][engine] = item
+            await _try_early_publish(tx_id)
+
+    # ── Drain: order validation ──
     async def _drain_validation() -> None:
         q = broker.subscribe(ORDER_VALIDATION)
         while True:
-            item  = await q.get()
+            item = await q.get()
             tx_id = item["tx"]["transaction_id"]
-            if tx_id in _buffer:
-                _buffer[tx_id]["validation"] = item
-                await _emit_if_ready(tx_id)
-            else:
-                _pre_validation[tx_id] = item
-
-    async def _drain_arrival() -> None:
-        q = broker.subscribe(ARRIVAL_NOTIFICATION)
-        while True:
-            item  = await q.get()
-            tx_id = (
-                item.get("orderIdentifier")
-                or item.get("transaction_id")
-                or item.get("sales_order_id")
-                or ((item.get("HouseConsignment") or {}).get("Order") or {}).get("orderIdentifier")
-            )
-            if not tx_id:
+            entry = _get(tx_id)
+            if entry["routed"]:
                 continue
-            if tx_id in _buffer:
-                _buffer[tx_id]["arrival"] = item
-                await _emit_if_ready(tx_id)
-            else:
-                _pre_arrival[tx_id] = item
+            entry["validation"] = item
+            # Start the timer — assessment publishes in 3s or sooner
+            _start_timer(tx_id)
+            # Check if all risk outcomes already arrived
+            await _try_early_publish(tx_id)
 
-    await asyncio.gather(_drain_agent_release(), _drain_validation(), _drain_arrival())
+    await asyncio.gather(_drain_risk(), _drain_validation())
 
 
-# ── DB Store Worker (all terminal event topics) ───────────────────────────────
+# ── Custom & Tax Risk Management System ──────────────────────────────────────
+#
+# Subscribes to ASSESSMENT_OUTCOME (retain + investigate routes) and
+# SALES_ORDER_EVENT. For now, produces an INVESTIGATION_OUTCOME event
+# that echoes the assessment input (placeholder for future human-in-the-loop
+# or AI-driven investigation logic).
+
+async def _ct_risk_management_factory() -> None:
+    """
+    Custom & Tax Risk Management System.
+
+    Subscribes to ASSESSMENT_OUTCOME (retain + investigate routes only).
+    For each such event, atomically writes the 3-row case dataset
+    (Sales_Order + Sales_Order_Risk + Sales_Order_Case) into
+    investigation.db and pushes the hydrated case to C&T Risk Management System
+    SSE subscribers.
+
+    Does NOT publish INVESTIGATION_OUTCOME at creation. That event is the
+    factory's exit signal and fires only when an officer closes the case
+    (see customs-action retainment/release endpoint).
+    """
+    from lib.database import (
+        upsert_investigation_set, get_case_hydrated,
+        find_similar_open_case, append_order_to_case,
+        update_case_engine_scores, get_case_transaction_count,
+    )
+    from lib import sales_order_statuses as SO_STATUS
+    import uuid as _uuid
+
+    # Buffer transactions from SALES_ORDER_EVENT by order_id so that when
+    # an ASSESSMENT_OUTCOME arrives we can look up the original tx data.
+    _tx_buffer: dict[str, dict] = {}
+
+    async def _drain_tx() -> None:
+        q = broker.subscribe(SALES_ORDER_EVENT)
+        while True:
+            tx = await q.get()
+            _tx_buffer[tx["transaction_id"]] = tx
+
+    async def _drain_assessment() -> None:
+        q = broker.subscribe(ASSESSMENT_OUTCOME)
+        while True:
+            msg = await q.get()
+            route = msg.get("route")
+            if route != "investigate":
+                _tx_buffer.pop(msg.get("order_id", ""), None)
+                continue
+            try:
+                order_id = msg.get("order_id", "")
+                tx = _tx_buffer.pop(order_id, None) or {}
+                now_iso = datetime.now(timezone.utc).isoformat()
+                bk = msg.get("Sales_Order_Business_Key", "")
+
+                # Per-order overall risk score (0-1) from the assessment
+                order_risk_score = float(msg.get("Overall_Risk_Score") or 0)
+
+                # Extract per-engine risk scores (0-1)
+                eo = msg.get("engine_outcomes", {}) or {}
+                eng_scores = {
+                    "Engine_VAT_Ratio":             float(eo.get("vat_ratio", {}).get("risk", 0) or 0),
+                    "Engine_ML_Watchlist":           float(eo.get("watchlist", {}).get("risk", 0) or 0),
+                    "Engine_IE_Seller_Watchlist":    float(eo.get("ireland_watchlist", {}).get("risk", 0) or 0),
+                    "Engine_Description_Vagueness":  float(eo.get("description_vagueness", {}).get("risk", 0) or 0),
+                }
+
+                # Derive VAT problem type from engine outcomes
+                vat_flagged = eo.get("vat_ratio", {}).get("risk", 0) >= 0.5
+                wl_flagged  = eo.get("watchlist", {}).get("risk", 0) >= 0.5
+                if vat_flagged and wl_flagged:
+                    problem_type = "VAT Rate Deviation + Watchlist Match"
+                elif vat_flagged:
+                    problem_type = "VAT Rate Deviation"
+                elif wl_flagged:
+                    problem_type = "Watchlist Match"
+                else:
+                    problem_type = "Risk Pattern"
+
+                ml = eo.get("watchlist", {})
+                def _pct(v):
+                    return round(float(v) * 100, 1) if v is not None else None
+
+                so_row = {
+                    "Sales_Order_ID":           order_id,
+                    "Sales_Order_Business_Key": bk,
+                    "HS_Product_Category":      tx.get("item_category"),
+                    "Product_Description":      tx.get("item_description"),
+                    "Product_Value":            tx.get("value"),
+                    "VAT_Rate":                 tx.get("vat_rate"),
+                    "VAT_Fee":                  tx.get("vat_amount"),
+                    "Seller_Name":              tx.get("seller_name"),
+                    "Country_Origin":           tx.get("seller_country"),
+                    "Country_Destination":      tx.get("buyer_country"),
+                    "Status":                   SO_STATUS.UNDER_INVESTIGATION,
+                    "Update_time":              now_iso,
+                    "Updated_by":               "system",
+                }
+                sor_row = {
+                    "Sales_Order_Risk_ID":         msg.get("Sales_Order_Risk_ID"),
+                    "Sales_Order_Business_Key":    bk,
+                    "Risk_Type":                   msg.get("Risk_Type", "VAT"),
+                    "Overall_Risk_Score":          msg.get("Overall_Risk_Score"),
+                    "Overall_Risk_Level":          msg.get("Overall_Risk_Level"),
+                    "Seller_Risk_Score":           _pct(ml.get("seller_risk")),
+                    "Country_Risk_Score":          _pct(ml.get("country_risk")),
+                    "Product_Category_Risk_Score": _pct(ml.get("product_category_risk")),
+                    "Manufacturer_Risk_Score":     _pct(ml.get("destination_risk")),
+                    "Confidence_Score":            msg.get("Confidence_Score"),
+                    "Overall_Risk_Description":    ml.get("description"),
+                    "Proposed_Risk_Action":        msg.get("Proposed_Risk_Action"),
+                    "Risk_Comment":                None,
+                    "Evaluation_by":               None,
+                    "Update_time":                 now_iso,
+                    "Updated_by":                  "system",
+                }
+
+                existing = find_similar_open_case(
+                    seller      = tx.get("seller_name", ""),
+                    destination = tx.get("buyer_country", ""),
+                    category    = tx.get("item_category", ""),
+                    description = tx.get("item_description", ""),
+                )
+
+                if existing:
+                    existing_case_id = existing["Case_ID"]
+                    append_order_to_case(existing_case_id, so_row, sor_row)
+                    # Recompute averages across all orders in the case
+                    n = get_case_transaction_count(existing_case_id)
+                    old = get_case_hydrated(existing_case_id) or {}
+                    avg = {}
+                    for field in ("Engine_VAT_Ratio", "Engine_ML_Watchlist",
+                                  "Engine_IE_Seller_Watchlist", "Engine_Description_Vagueness"):
+                        old_val = float(old.get(field) or 0)
+                        new_val = eng_scores[field]
+                        avg[field] = ((old_val * (n - 1)) + new_val) / n if n > 0 else new_val
+                    old_overall = float(old.get("Overall_Case_Risk_Score") or 0)
+                    new_overall = ((old_overall * (n - 1)) + order_risk_score) / n if n > 0 else order_risk_score
+                    update_case_engine_scores(
+                        existing_case_id, avg,
+                        overall_score=new_overall,
+                        risk_level=case_risk_level(new_overall))
+                    hydrated = get_case_hydrated(existing_case_id)
+                    _push_rg_case_sse({"event": "case_updated", "action": "tx_appended", "case": hydrated})
+                else:
+                    case_id = f"CASE-{_uuid.uuid4().hex[:12].upper()}"
+                    so_row["Case_ID"] = case_id
+                    soc_row = {
+                        "Case_ID":                          case_id,
+                        "Sales_Order_Business_Key":         bk,
+                        "Status":                           STATUS.NEW,
+                        "VAT_Problem_Type":                 problem_type,
+                        "Recommended_Product_Value":        None,
+                        "Recommended_VAT_Product_Category": None,
+                        "Recommended_VAT_Rate":             None,
+                        "Recommended_VAT_Fee":              None,
+                        "AI_Analysis":                      None,
+                        "AI_Confidence":                    None,
+                        "VAT_Gap_Fee":                      None,
+                        "Evaluation_by":                    None,
+                        "Proposed_Action_Tax":              None,
+                        "Proposed_Action_Customs":          None,
+                        "Communication":                    "[]",
+                        "Additional_Evidence":              None,
+                        "Update_time":                      now_iso,
+                        "Updated_by":                       "system",
+                        "Created_time":                     now_iso,
+                        "Overall_Case_Risk_Score":          order_risk_score,
+                        "Overall_Case_Risk_Level":          case_risk_level(order_risk_score),
+                        **eng_scores,
+                    }
+                    upsert_investigation_set(so_row, sor_row, soc_row)
+                    hydrated = get_case_hydrated(case_id) or {"Case_ID": case_id}
+                    _push_rg_case_sse({"event": "new_case", "case": hydrated})
+                    print(f"  [C&T] case {case_id} created for {tx.get('seller_name','?')}")
+                    insert_agent_log({
+                        "transaction_id": case_id,
+                        "seller_name": tx.get("seller_name"),
+                        "buyer_country": tx.get("buyer_country"),
+                        "item_description": tx.get("item_description"),
+                        "item_category": tx.get("item_category"),
+                        "value": tx.get("value"),
+                        "vat_rate": tx.get("vat_rate"),
+                        "correct_vat_rate": None,
+                        "verdict": "case_created",
+                        "reasoning": f"Case {case_id} created — {problem_type}",
+                        "legislation_refs": "[]", "sent_to_ireland": 0,
+                        "processed_at": now_iso,
+                    })
+            except Exception as e:
+                print(f"  [C&T] ERROR processing assessment: {e}")
+                import traceback; traceback.print_exc()
+
+    await asyncio.gather(_drain_tx(), _drain_assessment())
+
+
+# ── (C&T Risk Management System two-entity workflow removed — replaced by
+# _ct_risk_management_factory above.) ──
+
+
+_REMOVED_FLAT_TX_VIEW = True  # marker — old _flat_tx_view and related
+# customs/tax queue helpers, listeners, SSE streams, and REST endpoints
+# have been removed. The C&T Risk Management factory replaces them.
+
+
+# ── Exit Process Worker (all terminal event topics) ──────────────────────────
 
 async def _db_store_worker() -> None:
     """
-    Terminal worker — persists fully processed transactions to the European
-    Custom DB, live queue, and SSE clients.
+    Exit Process Factory — emits a single terminal CUSTOM_OUTCOME event
+    per completed order. Persistence to the legacy data hub is deactivated.
 
-    Subscribes to the terminal event topics:
-      RELEASE_EVENT                     — green path  (no suspicious flag)
-      RELEASE_AFTER_INVESTIGATION_EVENT — cleared     (no suspicious flag)
-      AGENT_RETAIN_EVENT                — retained after Customs decision  (flag set)
+    Subscribes to:
+      ASSESSMENT_OUTCOME    — release route  → CUSTOM_OUTCOME automated_release
+                            — retain route   → CUSTOM_OUTCOME automated_retain
+      INVESTIGATION_OUTCOME — outcome released/retained →
+                            CUSTOM_OUTCOME custom_release / custom_retain
 
-    NOTE: RETAIN_EVENT is no longer terminal in the two-entity model. Items
-    routed to the RED path are now picked up by _customs_listener_factory and
-    parked in the Customs queue for the operator's final decision. They reach
-    DB storage via AGENT_RETAIN_EVENT (Customs retains) or
-    RELEASE_AFTER_INVESTIGATION_EVENT (Customs releases) once the operator
-    has acted.
+    Each emitted event carries: order_id, timestamp, status.
     """
-    async def _push_sse(row: dict) -> None:
-        if not _sse_queues:
-            return
-        payload = _json.dumps(row)
-        dead    = set()
-        for sse_q in _sse_queues:
-            try:
-                sse_q.put_nowait(payload)
-            except asyncio.QueueFull:
-                dead.add(sse_q)
-        _sse_queues.difference_update(dead)
+    async def _emit(order_id: str, status: str) -> None:
+        await broker.publish(CUSTOM_OUTCOME, {
+            "order_id":  order_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "status":    status,
+        })
 
-    async def _store(msg: dict, suspicious: bool) -> None:
-        tx         = msg["tx"]
-        risk_score = msg.get("risk_score", "green")
-        alarm_id   = msg.get("alarm_id")
-
-        insert_transaction(tx)
-
-        if suspicious:
-            flag_transaction_suspicious(tx["transaction_id"], alarm_id, risk_score)
-
-        row = dict(tx)
-        row["suspicious"]     = 1 if suspicious else 0
-        row["risk_score"]     = risk_score
-        row["risk_1_flagged"] = msg.get("risk_1_flagged", False)
-        row["risk_2_flagged"] = msg.get("risk_2_flagged", False)
-        _live_queue.appendleft(row)
-        await _push_sse(row)
-
-    async def _drain(topic: str, suspicious: bool) -> None:
-        q = broker.subscribe(topic)
+    async def _drain_assessment() -> None:
+        q = broker.subscribe(ASSESSMENT_OUTCOME)
         while True:
             msg = await q.get()
-            await _store(msg, suspicious)
+            route = msg.get("route")
+            if route == "release":
+                await _emit(msg.get("order_id", ""), "automated_release")
+            elif route == "retain":
+                await _emit(msg.get("order_id", ""), "automated_retain")
 
-    await asyncio.gather(
-        _drain(RELEASE_EVENT,                     False),
-        _drain(RELEASE_AFTER_INVESTIGATION_EVENT,  False),
-        _drain(AGENT_RETAIN_EVENT,                True),
-    )
-
-
-# ── Data Hub Writer (3 dark-purple tables, 30-s polling worker) ──────────────
-
-# Tick interval — how often the writer drains its in-memory buffer and upserts
-# into the data hub tables. The user spec says "every 30 sec".
-_DATA_HUB_TICK_S = 30.0
-
-# Per-key buffers populated by the topic listeners between ticks. Each maps
-# sales_order_line_item_SKU → row dict ready to be upserted. The polling tick
-# moves them out of the buffer; if a topic re-fires for the same key before
-# the tick, the buffer entry is replaced (latest wins).
-_data_hub_so_buffer: dict[str, dict] = {}
-_data_hub_risk_buffer: dict[str, dict] = {}
-_data_hub_ai_buffer: dict[str, dict] = {}
-
-
-def _line_sku(tx: dict, line_number: int = 1) -> str:
-    """Compute the deterministic per-line SKU. Today every order has exactly
-    one synthetic line so line_number is always 1; the helper exists to make
-    the multi-line migration trivial later."""
-    so_id = tx.get("orderIdentifier") or tx.get("transaction_id") or "unknown"
-    return f"{so_id}-{line_number:03d}"
-
-
-def _build_sales_order_line_item_row(tx: dict) -> dict | None:
-    """Convert a SALES_ORDER_EVENT message into a sales_order_line_item row.
-    Returns None if essential fields are missing."""
-    so_id = tx.get("orderIdentifier") or tx.get("transaction_id")
-    if not so_id:
-        return None
-    sku = _line_sku(tx, 1)
-
-    # The simplified_order.json schema carries:
-    #   DeemedImporter (order header)         = the EU reseller
-    #   SalesLineItem[i].Seller (line level)  = the non-EU producer
-    # Pull both from the message; fall back to flat compat fields if needed.
-    deemed_importer = tx.get("DeemedImporter") or {}
-    importer_addr   = deemed_importer.get("Address") or {}
-
-    sales_lines = tx.get("SalesLineItem") or []
-    li          = sales_lines[0] if sales_lines else {}
-    li_seller   = li.get("Seller") or {}
-    li_addr     = li_seller.get("Address") or {}
-    li_desc     = ((li.get("DescriptionOfGoods") or {}).get("descriptionOfGoods")
-                   or tx.get("item_description") or "")
-
-    dest_country = (
-        ((tx.get("CountryOfDestination") or {}).get("country"))
-        or tx.get("buyer_country")
-        or ""
-    )
-
-    return {
-        "sales_order_line_item_SKU": sku,
-        "so_id":                     so_id,
-        "line_item_name":            sku,
-        "line_item_SKU":             sku,
-        "line_item_description":     li_desc,
-        "line_item_price":           li.get("itemAmountPrice") or tx.get("value") or 0.0,
-        "product_category":          tx.get("item_category") or "",
-        # Order-header party — DeemedImporter (EU reseller)
-        "deemed_importer_id":        deemed_importer.get("identificationNumber") or tx.get("seller_id") or "",
-        "deemed_importer_name":      deemed_importer.get("name")                 or tx.get("seller_name") or "",
-        "deemed_importer_country":   importer_addr.get("country")                or tx.get("seller_country") or "",
-        # Per-line party — Seller (non-EU producer)
-        "seller_id":                 li_seller.get("identificationNumber") or tx.get("producer_id"),
-        "seller_name":               li_seller.get("name")                 or tx.get("producer_name"),
-        "seller_city":               li_addr.get("cityName")                or tx.get("producer_city"),
-        "origin_country":            li_addr.get("country")                 or tx.get("producer_country"),
-        "destination_country":       dest_country,
-        "dest_country_region":       country_region(dest_country),
-        "VAT_pct":                   tx.get("vat_rate") or 0.0,
-        "VAT_paid":                  tx.get("vat_amount") or 0.0,
-        "date":                      (tx.get("orderCreationDate")
-                                      or tx.get("transaction_date") or ""),
-    }
-
-
-# Mapping from RT_SCORE categorical → numeric / level / suggested action.
-# Locked in with the user: High=100, Medium=50, Low=0.
-_RT_SCORE_TO_RISK = {
-    "red":   {"score": 100, "level": "High",   "action": "retain"},
-    "amber": {"score":  50, "level": "Medium", "action": "investigate"},
-    "green": {"score":   0, "level": "Low",    "action": "release"},
-}
-
-
-def _build_line_item_risk_row(msg: dict) -> dict | None:
-    """Convert an RT_SCORE message into a line_item_risk row. Every transaction
-    that passes through the pipeline produces an RT_SCORE event so this fires
-    for every line — matching the user's rule that risk is always populated."""
-    tx = msg.get("tx") or {}
-    sku = _line_sku(tx, 1)
-    if not tx.get("orderIdentifier") and not tx.get("transaction_id"):
-        return None
-
-    rt_color = (msg.get("risk_score") or "green").lower()
-    mapping  = _RT_SCORE_TO_RISK.get(rt_color, _RT_SCORE_TO_RISK["green"])
-
-    # risk_description = "; "-joined names of failed checks (RT Risk 1 / 2),
-    # empty when nothing flagged. The two flags travel with the RT_SCORE
-    # message published by RT Consolidation.
-    failed: list[str] = []
-    if msg.get("risk_1_flagged"):
-        failed.append("vat_ratio_deviation")
-    if msg.get("risk_2_flagged"):
-        failed.append("watchlist_hit")
-    description = "; ".join(failed)
-
-    return {
-        "sales_order_line_item_SKU": sku,
-        "risk_score_numeric":        mapping["score"],
-        "risk_level":                mapping["level"],
-        "risk_description":          description,
-        "suggested_risk_action":     mapping["action"],
-    }
-
-
-def _build_line_item_ai_row(msg: dict) -> dict | None:
-    """Convert an AI_ANALYSIS_EVENT into a line_item_ai_analysis row. Only
-    fires when the Tax officer manually runs the agent — most transactions
-    will never appear in this table, by design."""
-    tx = msg.get("tx") or {}
-    sku = _line_sku(tx, 1)
-    if not tx.get("orderIdentifier") and not tx.get("transaction_id"):
-        return None
-
-    verdict   = (msg.get("verdict") or "uncertain").lower()
-    reasoning = msg.get("reasoning") or ""
-
-    # Confidence derivation (locked in with user): correct→1.0, uncertain→0.5,
-    # incorrect→0.0. Cheap and consistent until the analyser produces a real
-    # confidence number.
-    confidence = {"correct": 1.0, "uncertain": 0.5, "incorrect": 0.0}.get(verdict, 0.5)
-
-    # source = "; "-joined unique source names from the legislation refs.
-    refs = msg.get("legislation_refs") or []
-    seen: set[str] = set()
-    sources: list[str] = []
-    for r in refs:
-        s = (r.get("source") or "").strip() if isinstance(r, dict) else str(r)
-        if s and s not in seen:
-            seen.add(s)
-            sources.append(s)
-    source_str = "; ".join(sources)
-
-    # Per-line verdicts carry the corrected VAT rate (`expected_rate`) and the
-    # rate that was actually applied. Today there is exactly one synthetic
-    # line per transaction so we use line_verdicts[0]; this generalises
-    # cleanly when multi-line orders arrive (we'd loop and emit one row per
-    # line_item_id).
-    line_verdicts = msg.get("line_verdicts") or []
-    expected_rate = None
-    if line_verdicts:
-        expected_rate = line_verdicts[0].get("expected_rate")
-
-    line_price = tx.get("value") or 0.0
-    vat_paid   = tx.get("vat_amount") or 0.0
-
-    if expected_rate is not None and line_price:
-        # The analyser returns expected_rate as a fraction (0.21 = 21%).
-        correct_vat_value = round(line_price * float(expected_rate), 2)
-        vat_exposure      = round(correct_vat_value - vat_paid, 2)
-        correct_vat_pct   = float(expected_rate)
-    else:
-        correct_vat_value = None
-        vat_exposure      = None
-        correct_vat_pct   = None
-
-    return {
-        "sales_order_line_item_SKU": sku,
-        "analysis_outcome":          verdict,
-        "analysis_description":      reasoning,
-        "confidence_score":          confidence,
-        "source":                    source_str,
-        # No source for category correction today (the agent doesn't return
-        # one and the simulator never seeds wrong-category fraud).
-        "correct_product_category":  None,
-        "correct_vat_pct":           correct_vat_pct,
-        "correct_vat_value":         correct_vat_value,
-        "vat_exposure":              vat_exposure,
-    }
-
-
-async def _data_hub_writer() -> None:
-    """
-    Polling worker that populates the three data hub tables.
-
-    Architecture:
-      1. Subscribe ONCE at startup to SALES_ORDER_EVENT, RT_SCORE, and
-         AI_ANALYSIS_EVENT. Listener coroutines accumulate the latest row per
-         (sales_order_line_item_SKU) into the three module-level buffers.
-      2. Tick every _DATA_HUB_TICK_S seconds: drain each buffer and upsert
-         into its target table inside a single transaction.
-
-    Idempotency: every upsert keys on sales_order_line_item_SKU and uses
-    INSERT ... ON CONFLICT DO UPDATE, so re-receiving the same line is safe.
-
-    Lifecycle: matches the user's rule —
-      • every transaction → 1 row in sales_order_line_item + 1 in line_item_risk
-      • only tax-officer-triggered analyses → 1 row in line_item_ai_analysis
-    """
-    so_q   = broker.subscribe(SALES_ORDER_EVENT)
-    risk_q = broker.subscribe(RT_SCORE)
-    ai_q   = broker.subscribe(AI_ANALYSIS_EVENT)
-
-    async def _drain_so() -> None:
+    async def _drain_investigation() -> None:
+        q = broker.subscribe(INVESTIGATION_OUTCOME)
         while True:
-            msg = await so_q.get()
-            row = _build_sales_order_line_item_row(msg)
-            if row:
-                _data_hub_so_buffer[row["sales_order_line_item_SKU"]] = row
+            msg = await q.get()
+            outcome = msg.get("outcome") or msg.get("route") or ""
+            if outcome == "released":
+                status = "custom_release"
+            elif outcome == "retained":
+                status = "custom_retain"
+            else:
+                continue   # ignore refused / other terminal states for now
+            order_id = msg.get("Sales_Order_ID") or msg.get("Sales_Order_Business_Key", "")
+            await _emit(order_id, status)
 
-    async def _drain_risk() -> None:
-        while True:
-            msg = await risk_q.get()
-            row = _build_line_item_risk_row(msg)
-            if row:
-                _data_hub_risk_buffer[row["sales_order_line_item_SKU"]] = row
+    await asyncio.gather(_drain_assessment(), _drain_investigation())
 
-    async def _drain_ai() -> None:
-        while True:
-            msg = await ai_q.get()
-            row = _build_line_item_ai_row(msg)
-            if row:
-                _data_hub_ai_buffer[row["sales_order_line_item_SKU"]] = row
-
-    async def _tick() -> None:
-        while True:
-            await asyncio.sleep(_DATA_HUB_TICK_S)
-            # Snapshot + clear so the listeners can keep accepting messages
-            # while we write. Race window is harmless — anything that arrives
-            # during the writes lands in the next tick.
-            so_snap   = list(_data_hub_so_buffer.values());   _data_hub_so_buffer.clear()
-            risk_snap = list(_data_hub_risk_buffer.values()); _data_hub_risk_buffer.clear()
-            ai_snap   = list(_data_hub_ai_buffer.values());   _data_hub_ai_buffer.clear()
-
-            # Sales Order + Line Item rows MUST land before Risk / AI rows
-            # for that SKU because the latter two FK back to it. Within a
-            # single tick we drain all three so this ordering matters only
-            # if the same SKU appears in both buffers (which is the common
-            # case): the SO row gets inserted first, then the FK rows resolve.
-            for row in so_snap:
-                try:
-                    upsert_sales_order_line_item(row)
-                except Exception as exc:
-                    print(f"[data_hub] SO upsert failed for {row.get('sales_order_line_item_SKU')}: {exc}")
-            for row in risk_snap:
-                try:
-                    upsert_line_item_risk(row)
-                except Exception as exc:
-                    print(f"[data_hub] risk upsert failed for {row.get('sales_order_line_item_SKU')}: {exc}")
-            for row in ai_snap:
-                try:
-                    upsert_line_item_ai_analysis(row)
-                except Exception as exc:
-                    print(f"[data_hub] AI upsert failed for {row.get('sales_order_line_item_SKU')}: {exc}")
-
-            if so_snap or risk_snap or ai_snap:
-                print(f"[data_hub] tick: SO={len(so_snap)} risk={len(risk_snap)} ai={len(ai_snap)}")
-
-    await asyncio.gather(_drain_so(), _drain_risk(), _drain_ai(), _tick())
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from lib.database import init_european_custom_db, init_simulation_db, reset_simulation_db
+    from lib.database import init_european_custom_db, init_simulation_db, init_investigation_db, reset_simulation_db
     init_european_custom_db()
     init_simulation_db()
+    init_investigation_db()
     # Auto-reset: clear the fired flags so the simulation is always
     # ready to run on startup. Without this, a previous completed run
     # leaves all transactions marked fired=1 and the simulation loop
     # has nothing to replay after a restart.
     reset_simulation_db()
 
+    # Pre-load the vagueness NLP model in a thread so it doesn't block
+    # the event loop when the first transaction arrives at Engine 4.
+    import concurrent.futures
+    _model_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    _model_pool.submit(_get_vagueness_model)
+
     asyncio.create_task(simulation_loop(_fire_transactions))
     asyncio.create_task(_RT_risk_monitoring_1_factory())
     asyncio.create_task(_RT_risk_monitoring_2_factory())
-    asyncio.create_task(_RT_consolidation_factory())
+    asyncio.create_task(_RT_risk_monitoring_3_factory())
+    asyncio.create_task(_RT_risk_monitoring_4_factory())
+    # Consolidation is now handled inside _release_factory (unified routing).
     asyncio.create_task(_order_validation_factory())
-    asyncio.create_task(_arrival_notification_factory())
+    # _arrival_notification_factory removed (Goods Transport flow eliminated)
     asyncio.create_task(_release_factory())
-    asyncio.create_task(_retain_factory())
-    asyncio.create_task(_investigate_dispatch_factory())
+    # _retain_factory and _investigate_dispatch_factory are removed —
+    # the unified _release_factory handles all three routes.
     # Two-entity model: each office has its own listener.
     #   RED   → RETAIN_EVENT      → _customs_listener → _customs_queue
     #   AMBER → INVESTIGATE_EVENT → _tax_listener     → _tax_queue
-    asyncio.create_task(_customs_listener_factory())
-    asyncio.create_task(_tax_listener_factory())
-    asyncio.create_task(_release_after_investigation_factory())
+    asyncio.create_task(_ct_risk_management_factory())
     asyncio.create_task(_db_store_worker())
-    asyncio.create_task(_data_hub_writer())
+
+    # Note: broker queues are NOT drained on startup — the factories need
+    # their subscriber queues intact. Queue depths are masked in the UI
+    # (show_queues=False) when the simulation hasn't started yet.
+    # _data_hub_writer removed — DB Store Factory now writes directly
+    # to the new data model tables (Sales_Order + Sales_Order_Risk)
     asyncio.create_task(_sim_state_broadcaster())
+
+    # VAT Fraud Detection agent queue + worker(s). Initialise the queue
+    # inside the running loop so put/get bind to the right loop.
+    global _agent_queue
+    _agent_queue = asyncio.Queue()
+    for _ in range(AGENT_WORKERS):
+        asyncio.create_task(_agent_worker())
 
     yield
 
@@ -1294,28 +1208,30 @@ def _compute_sim_state_snapshot() -> dict:
 
     # ── Pipeline block (same shape as GET /api/simulation/pipeline) ──
     topics = [
-        SALES_ORDER_EVENT, RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME,
-        RT_SCORE, ORDER_VALIDATION, ARRIVAL_NOTIFICATION,
+        SALES_ORDER_EVENT, RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME, RT_RISK_3_OUTCOME, RT_RISK_4_OUTCOME,
+        RT_SCORE, ORDER_VALIDATION, ASSESSMENT_OUTCOME, INVESTIGATION_OUTCOME,
+        CUSTOM_OUTCOME,
         RELEASE_EVENT, RETAIN_EVENT, INVESTIGATE_EVENT,
-        AGENT_RETAIN_EVENT, AGENT_RELEASE_EVENT, RELEASE_AFTER_INVESTIGATION_EVENT,
     ]
+    show_queues = state.fired_count > 0 or state.running
     pipeline = {
         "events":             {t: event_count(t) for t in topics},
-        "queues":             {t: _broker.qsize(t) for t in topics},
+        "queues":             {t: (_broker.qsize(t) if show_queues else 0) for t in topics},
         "stored_count":       get_transaction_count(),
-        # Two-entity model: separate counters for the Customs and Tax queues
-        # plus how many tax items are currently being analysed by the agent.
-        "customs_queue":          len(_customs_queue),
-        "tax_queue":              len(_tax_queue),
-        "tax_queue_agent_running": sum(
-            1 for v in _tax_queue.values() if v.get("agent_status") == "agent_running"
-        ),
         "risk_flags": {
             "rt_risk_1_flagged": count_field_value(RT_RISK_1_OUTCOME, "outcome.flagged", True),
             "rt_risk_2_flagged": count_field_value(RT_RISK_2_OUTCOME, "outcome.flagged", True),
+            "rt_risk_3_flagged": count_field_value(RT_RISK_3_OUTCOME, "outcome.flagged", True),
+            "rt_risk_4_flagged": count_field_value(RT_RISK_4_OUTCOME, "outcome.flagged", True),
             "rt_score_green":    count_field_value(RT_SCORE, "outcome.risk_score", "green"),
             "rt_score_amber":    count_field_value(RT_SCORE, "outcome.risk_score", "amber"),
             "rt_score_red":      count_field_value(RT_SCORE, "outcome.risk_score", "red"),
+        },
+        "custom_outcome_status": {
+            "automated_release": count_field_value(CUSTOM_OUTCOME, "outcome.status", "automated_release"),
+            "automated_retain":  count_field_value(CUSTOM_OUTCOME, "outcome.status", "automated_retain"),
+            "custom_release":    count_field_value(CUSTOM_OUTCOME, "outcome.status", "custom_release"),
+            "custom_retain":     count_field_value(CUSTOM_OUTCOME, "outcome.status", "custom_retain"),
         },
     }
 
@@ -1450,7 +1366,7 @@ def api_get_suspicious(limit: int = Query(50, ge=1, le=200)):
 #
 # Read-only audit log of every VAT Fraud Detection Agent run, populated by
 # api_tax_run_agent on the new two-entity flow. The agent itself is now
-# triggered exclusively from the Tax officer's Revenue Guardian page via
+# triggered exclusively from the Tax officer's C&T Risk Management System page via
 # POST /api/tax/{transaction_id}/run-agent.
 
 @app.get("/api/agent-log")
@@ -1473,356 +1389,538 @@ def api_ireland_case(transaction_id: str):
     return case
 
 
-# ── Two-entity manual workflow API (revenue-guardian UI on :8080) ────────────
-#
-# Customs and Tax are exposed as two completely separate API surfaces, each
-# with its own queue endpoint and SSE stream. The only inter-entity hops are
-# /api/customs/{id}/escalate-to-tax and /api/tax/{id}/recommend, both of
-# which physically transfer the entry between dicts and broadcast on both
-# SSE streams so both UIs refresh together.
 
-class CustomsDecisionPayload(BaseModel):
-    action: str   # "release" | "retain"
+# ── Reference data (lookups for dropdowns / categories / regions) ───────────
 
+@app.get("/api/reference")
+def api_reference():
+    """Bundled reference data consumed by the C&T Risk Management System SPA at startup.
 
-class TaxRecommendationPayload(BaseModel):
-    recommendation: str   # "release" | "retain"
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-# ── Customs Office endpoints ─────────────────────────────────────────────────
-
-@app.get("/api/customs/queue")
-def api_customs_queue():
-    """Snapshot of every transaction currently in the Customs queue,
-    newest first. Includes RED items routed directly from RETAIN_EVENT
-    AND items returned from Tax with a recommendation."""
-    return _customs_snapshot()
-
-
-@app.post("/api/customs/{transaction_id}/escalate-to-tax")
-async def api_customs_escalate_to_tax(transaction_id: str):
+    Returns the four lookup tables seeded in european_custom.db. Static-ish
+    data — refresh by re-fetching, no SSE channel.
     """
-    Customs operator transfers a Customs queue item to the Tax queue
-    requesting a Tax recommendation.
-
-    Idempotency:
-      404 — unknown transaction_id
-      409 — item already in the Tax queue (or returned from Tax already)
-    """
-    entry = _customs_queue.get(transaction_id)
-    if not entry:
-        return JSONResponse(status_code=404, content={"detail": "transaction not found in Customs queue"})
-    if entry.get("tax_recommendation"):
-        return JSONResponse(status_code=409, content={"detail": "item already has a Tax recommendation; cannot re-escalate"})
-
-    now = _now_iso()
-    # Build a fresh Tax queue entry from the Customs entry. Mark the
-    # escalation provenance so the Tax UI can display a small badge.
-    _tax_queue[transaction_id] = {
-        "tx":                     entry["tx"],
-        "alarm":                  entry.get("alarm") or {},
-        "risk_score":             entry.get("risk_score"),
-        "route":                  entry.get("route"),
-        "escalated_from_customs": True,
-        "agent_status":           "pending",
-        "agent_verdict":          None,
-        "created_at":             now,
-        "updated_at":             now,
-    }
-    # Remove from Customs queue.
-    _customs_queue.pop(transaction_id, None)
-    _broadcast_customs_update()
-    _broadcast_tax_update()
-    return _tax_entry_view(_tax_queue[transaction_id])
-
-
-@app.post("/api/customs/{transaction_id}/decide")
-async def api_customs_decide(transaction_id: str, payload: CustomsDecisionPayload):
-    """
-    Customs operator's terminal release / retain decision.
-
-      release → publish AGENT_RELEASE_EVENT (the existing
-                _release_after_investigation_factory correlates with
-                validation + arrival and emits the terminal
-                RELEASE_AFTER_INVESTIGATION_EVENT for storage)
-      retain  → publish AGENT_RETAIN_EVENT directly (terminal)
-
-    If the entry carries a Tax recommendation that disagrees with the
-    operator's chosen action, custom_override=true is set on the published
-    terminal event for downstream audit.
-    """
-    action = (payload.action or "").lower().strip()
-    if action not in ("release", "retain"):
-        return JSONResponse(status_code=400, content={"detail": "action must be 'release' or 'retain'"})
-
-    entry = _customs_queue.get(transaction_id)
-    if not entry:
-        return JSONResponse(status_code=404, content={"detail": "transaction not found in Customs queue"})
-
-    tx       = entry["tx"]
-    alarm    = entry.get("alarm") or {}
-    tax_rec  = entry.get("tax_recommendation")
-    custom_override = bool(tax_rec and tax_rec != action)
-
-    if action == "release":
-        await broker.publish(AGENT_RELEASE_EVENT, {
-            "tx":                  tx,
-            "verdict":             "human_release",
-            "reasoning":           "Released by Customs operator",
-            "legislation_refs":    [],
-            "decided_by":          "customs",
-            "tax_recommendation":  tax_rec,
-            "custom_override":     custom_override,
-        })
-    else:
-        update_suspicion_level(transaction_id, "high")
-        insert_ireland_queue({
-            "transaction_id":   transaction_id,
-            "seller_name":      tx.get("seller_name", ""),
-            "seller_country":   tx.get("seller_country", ""),
-            "item_description": tx.get("item_description", ""),
-            "item_category":    tx.get("item_category", ""),
-            "value":            tx.get("value"),
-            "vat_rate":         tx.get("vat_rate"),
-            "correct_vat_rate": tx.get("correct_vat_rate"),
-            "vat_amount":       tx.get("vat_amount"),
-            "transaction_date": tx.get("transaction_date", ""),
-            "alarm_key":        alarm.get("alarm_key", ""),
-            "deviation_pct":    alarm.get("deviation_pct"),
-            "ratio_current":    alarm.get("ratio_current"),
-            "ratio_historical": alarm.get("ratio_historical"),
-            "agent_verdict":    "human_retain",
-            "agent_reasoning":  "Retained by Customs operator",
-            "queued_at":        _now_iso(),
-        })
-        await broker.publish(AGENT_RETAIN_EVENT, {
-            "tx":                  tx,
-            "verdict":             "human_retain",
-            "reasoning":           "Retained by Customs operator",
-            "risk_score":          "retained",
-            "alarm_id":            alarm.get("id"),
-            "alarm":               alarm,
-            "decided_by":          "customs",
-            "tax_recommendation":  tax_rec,
-            "custom_override":     custom_override,
-        })
-
-    _customs_queue.pop(transaction_id, None)
-    _broadcast_customs_update()
+    from lib.database import (
+        get_vat_categories, get_risk_levels, get_eu_regions, get_suspicion_types,
+        get_sales_order_statuses, get_case_statuses, get_risk_engine_signals,
+    )
     return {
-        "ok": True,
-        "action": action,
-        "transaction_id": transaction_id,
-        "tax_recommendation": tax_rec,
-        "custom_override": custom_override,
+        "vat_categories":        get_vat_categories(),
+        "risk_levels":           get_risk_levels(),
+        "regions":               get_eu_regions(),
+        "suspicion_types":       get_suspicion_types(),
+        "sales_order_statuses":  get_sales_order_statuses(),
+        "case_statuses":         get_case_statuses(),
+        "risk_engine_signals":   get_risk_engine_signals(),
+        "risk_thresholds": {
+            "release": round(THRESHOLD_RELEASE, 4),
+            "retain":  round(THRESHOLD_RETAIN, 4),
+        },
     }
 
 
-# ── Tax Office endpoints ─────────────────────────────────────────────────────
+# ── C&T Risk Management System: REST + SSE endpoints ──────────────────────────
 
-@app.get("/api/tax/queue")
-def api_tax_queue():
-    """Snapshot of every transaction currently in the Tax queue, newest
-    first. Includes AMBER items routed directly from INVESTIGATE_EVENT
-    AND items escalated from Customs."""
-    return _tax_snapshot()
-
-
-@app.post("/api/tax/{transaction_id}/recommend")
-async def api_tax_recommend(transaction_id: str, payload: TaxRecommendationPayload):
-    """
-    Tax operator publishes a non-binding recommendation. The entry is
-    transferred from the Tax queue back to the Customs queue with the
-    tax_recommendation field set. Customs makes the final call.
-    """
-    rec = (payload.recommendation or "").lower().strip()
-    if rec not in ("release", "retain"):
-        return JSONResponse(status_code=400, content={"detail": "recommendation must be 'release' or 'retain'"})
-
-    entry = _tax_queue.get(transaction_id)
-    if not entry:
-        return JSONResponse(status_code=404, content={"detail": "transaction not found in Tax queue"})
-
-    now = _now_iso()
-    _customs_queue[transaction_id] = {
-        "tx":                  entry["tx"],
-        "alarm":               entry.get("alarm") or {},
-        "risk_score":          entry.get("risk_score"),
-        "route":               entry.get("route"),
-        "tax_recommendation":  rec,
-        "tax_recommended_at":  now,
-        "created_at":          entry.get("created_at"),
-        "updated_at":          now,
-    }
-    _tax_queue.pop(transaction_id, None)
-    _broadcast_tax_update()
-    _broadcast_customs_update()
-    return _customs_entry_view(_customs_queue[transaction_id])
+@app.get("/api/rg/cases")
+def api_rg_cases(status: str | None = Query(None), limit: int = Query(200, ge=1, le=1000)):
+    """List all cases for C&T Risk Management System, hydrated with Sales_Order +
+    Sales_Order_Risk fields. Optionally filter by Status."""
+    from lib.database import get_all_cases_hydrated
+    return {"items": get_all_cases_hydrated(status=status, limit=limit)}
 
 
-@app.post("/api/tax/{transaction_id}/run-agent")
-async def api_tax_run_agent(transaction_id: str):
-    """
-    Trigger the VAT fraud detection agent on a Tax queue item.
-
-    Returns immediately (202) after flipping agent_status → "agent_running";
-    the verdict lands via the SSE stream when ready.
-
-      404 — unknown transaction_id
-      409 — agent already running, or item is no longer in Tax queue
-    """
-    global _manual_agent_executor
-
-    entry = _tax_queue.get(transaction_id)
-    if not entry:
-        return JSONResponse(status_code=404, content={"detail": "transaction not found in Tax queue"})
-    if entry.get("agent_status") == "agent_running":
-        return JSONResponse(status_code=409, content={"detail": "agent already running"})
-
-    if _manual_agent_executor is None:
-        import concurrent.futures
-        _manual_agent_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
-
-    now = _now_iso()
-    entry["agent_status"] = "agent_running"
-    entry["updated_at"]   = now
-    _broadcast_tax_update()
-
-    async def _run() -> None:
-        from lib.agent_bridge import analyse_transaction_sync
-        tx = entry["tx"]
+@app.get("/api/rg/cases/stream")
+async def api_rg_cases_stream(request: Request):
+    """SSE stream: pushes case events (new_case, case_updated) to C&T Risk Management System."""
+    q: asyncio.Queue = asyncio.Queue(maxsize=100)
+    _rg_case_sse.add(q)
+    async def _gen():
         try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                _manual_agent_executor, analyse_transaction_sync, tx,
-            )
-            verdict = {
-                "verdict":          result.get("verdict", "uncertain"),
-                "reasoning":        result.get("reasoning", ""),
-                "legislation_refs": result.get("legislation_refs", []),
-                "line_verdicts":    result.get("line_verdicts", []),
-                "completed_at":     _now_iso(),
-            }
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    data = await asyncio.wait_for(q.get(), timeout=15)
+                    yield f"data: {data}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+        finally:
+            _rg_case_sse.discard(q)
+    return StreamingResponse(_gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.get("/api/rg/cases/{case_id}")
+def api_rg_case_detail(case_id: str):
+    """Single case detail (hydrated with Sales_Order + Sales_Order_Risk)."""
+    from lib.database import get_case_hydrated
+    case = get_case_hydrated(case_id)
+    if not case:
+        return JSONResponse(status_code=404, content={"detail": "Case not found"})
+    return case
+
+
+async def _publish_investigation_outcome(case_id: str, outcome: str) -> None:
+    """Emit the C&T factory's exit event when a case is closed."""
+    from lib.database import get_case_hydrated
+    case = get_case_hydrated(case_id)
+    if not case:
+        return
+    await broker.publish(INVESTIGATION_OUTCOME, {
+        "Case_ID":                  case_id,
+        # order_id is used by build_file_payload to derive the filename
+        # so each case gets its own persisted event file (not "unknown").
+        "order_id":                 case.get("Sales_Order_Business_Key") or case_id,
+        "Sales_Order_Business_Key": case.get("Sales_Order_Business_Key"),
+        "Sales_Order_ID":           case.get("Sales_Order_ID"),
+        "outcome":                  outcome,   # released | retained | refused
+        "Proposed_Action_Customs":  case.get("Proposed_Action_Customs"),
+        "Proposed_Action_Tax":      case.get("Proposed_Action_Tax"),
+        "VAT_Gap_Fee":              case.get("VAT_Gap_Fee"),
+        "Recommended_Product_Value":        case.get("Recommended_Product_Value"),
+        "Recommended_VAT_Product_Category": case.get("Recommended_VAT_Product_Category"),
+        "Recommended_VAT_Rate":             case.get("Recommended_VAT_Rate"),
+        "Recommended_VAT_Fee":              case.get("Recommended_VAT_Fee"),
+        "closed_by":                case.get("Updated_by"),
+        "closed_at":                case.get("Update_time"),
+    })
+
+
+def _emit_case_updated_sse(case_id: str, action: str) -> None:
+    """Push the hydrated case to RG SSE subscribers."""
+    from lib.database import get_case_hydrated
+    case = get_case_hydrated(case_id)
+    _push_rg_case_sse({"event": "case_updated", "action": action, "case": case})
+
+
+@app.get("/api/rg/cases/{case_id}/previous")
+def api_rg_previous_cases(case_id: str, limit: int = Query(20, ge=1, le=50)):
+    """Previous closed cases from the same seller."""
+    from lib.database import get_case_hydrated, get_previous_cases
+    case = get_case_hydrated(case_id)
+    if not case:
+        return {"items": []}
+    seller = case.get("Seller_Name", "")
+    return {"items": get_previous_cases(seller, exclude_case_id=case_id, limit=limit)}
+
+
+@app.get("/api/rg/cases/{case_id}/correlated")
+def api_rg_correlated_cases(case_id: str, limit: int = Query(20, ge=1, le=50)):
+    """Open cases with the same declared category (for correlation)."""
+    from lib.database import get_case_hydrated, get_correlated_cases
+    case = get_case_hydrated(case_id)
+    if not case:
+        return {"items": []}
+    category = case.get("HS_Product_Category", "")
+    return {"items": get_correlated_cases(category, exclude_case_id=case_id, limit=limit)}
+
+
+# ── VAT Fraud Detection agent: queue + worker ───────────────────────────────
+
+async def _enqueue_for_agent(case_id: str) -> None:
+    """Push a case_id onto the agent queue. No-op if the queue isn't ready."""
+    if _agent_queue is None:
+        return
+    await _agent_queue.put(case_id)
+    insert_agent_log({
+        "transaction_id": case_id, "seller_name": None,
+        "buyer_country": None, "item_description": None,
+        "item_category": None, "value": None,
+        "vat_rate": None, "correct_vat_rate": None,
+        "verdict": "queued", "reasoning": "Case enqueued for AI agent analysis",
+        "legislation_refs": "[]", "sent_to_ireland": 0,
+        "processed_at": datetime.now(timezone.utc).isoformat(),
+    })
+
+
+def _build_agent_tx(case: dict) -> dict:
+    """Shape the case as the tx dict the analyser expects."""
+    return {
+        "transaction_id":   case.get("Sales_Order_ID") or case.get("Sales_Order_Business_Key"),
+        "seller_name":      case.get("Seller_Name"),
+        "seller_country":   case.get("Country_Origin"),
+        "buyer_country":    case.get("Country_Destination"),
+        "item_description": case.get("Product_Description"),
+        "item_category":    case.get("HS_Product_Category"),
+        "value":            case.get("Product_Value"),
+        "vat_rate":         case.get("VAT_Rate"),
+        "vat_amount":       case.get("VAT_Fee"),
+    }
+
+
+async def _agent_worker() -> None:
+    """Single consumer of the agent queue. Country-of-destination gate:
+    IE → real subprocess analyser; everything else → 5 s sleep + uncertain.
+    On completion: write AI_Analysis, flip Status to "Under Review by Tax",
+    append a Communication entry, and broadcast case_updated SSE.
+    """
+    global _agent_in_progress
+    from lib.database import get_case_hydrated, update_case
+    from lib.agent_bridge import analyse_transaction_sync
+    from lib.llm_client import acquire_slot
+
+    assert _agent_queue is not None
+    while True:
+        case_id = await _agent_queue.get()
+        _agent_in_progress = case_id
+        try:
+            case = get_case_hydrated(case_id)
+            if not case:
+                continue
+
+            tx = _build_agent_tx(case)
             insert_agent_log({
-                "transaction_id":   tx.get("transaction_id"),
-                "seller_name":      tx.get("seller_name", ""),
-                "buyer_country":    tx.get("buyer_country", ""),
-                "item_description": tx.get("item_description", ""),
-                "item_category":    tx.get("item_category", ""),
-                "value":            tx.get("value"),
-                "vat_rate":         tx.get("vat_rate"),
-                "correct_vat_rate": tx.get("correct_vat_rate"),
-                "verdict":          verdict["verdict"],
-                "reasoning":        verdict["reasoning"],
-                "legislation_refs": _json.dumps(verdict["legislation_refs"]),
-                "sent_to_ireland":  0,
-                "processed_at":     verdict["completed_at"],
+                "transaction_id": case_id,
+                "seller_name": tx.get("seller_name"),
+                "buyer_country": tx.get("buyer_country"),
+                "item_description": tx.get("item_description"),
+                "item_category": tx.get("item_category"),
+                "value": tx.get("value"),
+                "vat_rate": tx.get("vat_rate"),
+                "correct_vat_rate": None,
+                "verdict": "processing",
+                "reasoning": f"Agent started analysing case {case_id}",
+                "legislation_refs": "[]", "sent_to_ireland": 0,
+                "processed_at": datetime.now(timezone.utc).isoformat(),
             })
-            # Publish to AI_ANALYSIS_EVENT so the data hub writer can populate
-            # line_item_ai_analysis. This is the only entry point that produces
-            # an AI verdict — agent runs are tax-officer-triggered, not every
-            # transaction gets one (matching the user's intent that AI analysis
-            # is selectively applied).
-            await broker.publish(AI_ANALYSIS_EVENT, {
-                "tx":               tx,
-                "verdict":          verdict["verdict"],
-                "reasoning":        verdict["reasoning"],
-                "legislation_refs": verdict["legislation_refs"],
-                "line_verdicts":    verdict["line_verdicts"],
-                "completed_at":     verdict["completed_at"],
+
+            destination = (case.get("Country_Destination") or "").upper()
+            if destination == "IE":
+                tx = _build_agent_tx(case)
+                async with acquire_slot():
+                    result = await asyncio.to_thread(analyse_transaction_sync, tx)
+            else:
+                await asyncio.sleep(5)
+                result = {
+                    "verdict":   "uncertain",
+                    "reasoning": f"Model for country '{destination or 'unknown'}' failed to run.",
+                    "success":   False,
+                }
+
+            verdict   = result.get("verdict", "uncertain")
+            reasoning = result.get("reasoning", "")
+            now_iso   = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+
+            comm = case.get("Communication", []) or []
+            comm.append({
+                "date":    now_iso,
+                "from":    "VAT Fraud Detection Agent",
+                "action":  f"verdict: {verdict}",
+                "message": reasoning,
             })
-        except Exception as exc:
-            import traceback
-            print(f"[tax_agent] error: {exc}\n{traceback.format_exc()}")
-            verdict = {
-                "verdict":          "uncertain",
-                "reasoning":        f"Agent error: {exc}",
-                "legislation_refs": [],
-                "line_verdicts":    [],
-                "completed_at":     _now_iso(),
-                "error":            True,
-            }
-        # Re-fetch in case the entry was moved/removed mid-run.
-        live = _tax_queue.get(transaction_id)
-        if live is None:
-            return
-        live["agent_verdict"] = verdict
-        live["agent_status"]  = "agent_done"
-        live["updated_at"]    = _now_iso()
-        _broadcast_tax_update()
-
-    _track_factory_task(_run())
-    return JSONResponse(status_code=202, content=_tax_entry_view(entry))
-
-
-@app.get("/api/transactions/{transaction_id}/timeline")
-def api_transaction_timeline(transaction_id: str):
-    """
-    Full chronological event history for a single transaction. Walks the
-    persisted event store (data/events/<topic>/<order_id>_<topic>.json) and
-    returns every event sharing this transaction_id, sorted oldest-first.
-
-    Used by the revenue-guardian case-detail page so the operator can see the
-    full lifecycle of an investigation (sales order → risk scores → validation
-    → arrival → routing → investigate event → eventual decision).
-    """
-    from lib.event_store import get_events_for_order
-    return get_events_for_order(transaction_id)
-
-
-def _make_sse_stream(snapshot_fn, sse_set: set[asyncio.Queue]):
-    """Build an SSE StreamingResponse around a snapshot function and a
-    subscriber set. Used by both the Customs and Tax queue streams."""
-    async def _stream(request: Request):
-        q: asyncio.Queue = asyncio.Queue(maxsize=20)
-        sse_set.add(q)
-        try:
-            initial = _json.dumps(snapshot_fn())
-        except Exception:
-            initial = None
-
-        async def event_generator():
+            update_case(case_id, {
+                "Status":        STATUS.UNDER_REVIEW_BY_TAX,
+                "AI_Analysis":   f"[{verdict}] {reasoning}",
+                "Update_time":   now_iso,
+                "Updated_by":    "VAT Fraud Detection Agent",
+                "Communication": comm,
+            })
+            _emit_case_updated_sse(case_id, "ai_complete")
+            insert_agent_log({
+                "transaction_id": case_id,
+                "seller_name": tx.get("seller_name"),
+                "buyer_country": tx.get("buyer_country"),
+                "item_description": tx.get("item_description"),
+                "item_category": tx.get("item_category"),
+                "value": tx.get("value"),
+                "vat_rate": tx.get("vat_rate"),
+                "correct_vat_rate": None,
+                "verdict": verdict,
+                "reasoning": reasoning,
+                "legislation_refs": _json.dumps(result.get("legislation_refs", [])) if isinstance(result, dict) else "[]",
+                "sent_to_ireland": 1 if verdict == "incorrect" or verdict == "suspicious" else 0,
+                "processed_at": now_iso,
+            })
+        except Exception as e:
+            # Don't crash the worker on a single bad case
             try:
-                if initial is not None:
-                    yield f"data: {initial}\n\n"
-                while True:
-                    if await request.is_disconnected():
-                        break
-                    try:
-                        payload = await asyncio.wait_for(q.get(), timeout=15.0)
-                        yield f"data: {payload}\n\n"
-                    except asyncio.TimeoutError:
-                        yield ": heartbeat\n\n"
-            finally:
-                sse_set.discard(q)
-
-        return StreamingResponse(
-            event_generator(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
-    return _stream
+                from lib.database import update_case
+                now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+                update_case(case_id, {
+                    "Status":      STATUS.UNDER_REVIEW_BY_TAX,
+                    "AI_Analysis": f"[uncertain] Agent worker error: {e}",
+                    "Update_time": now_iso,
+                    "Updated_by":  "VAT Fraud Detection Agent",
+                })
+                _emit_case_updated_sse(case_id, "ai_complete")
+            except Exception:
+                pass
+        finally:
+            _agent_in_progress = None
+            _agent_queue.task_done()
 
 
-@app.get("/api/customs/queue/stream")
-async def api_customs_queue_stream(request: Request):
-    """SSE stream of the Customs queue. Initial snapshot on connect, plus
-    a fresh snapshot whenever the queue changes (new RED listener arrival,
-    escalation to Tax removing an entry, recommendation back from Tax,
-    or terminal Customs decision)."""
-    return await _make_sse_stream(_customs_snapshot, _customs_sse)(request)
+@app.post("/api/rg/cases/{case_id}/ask")
+async def api_rg_case_ask(case_id: str, body: dict):
+    """AI assistant: answer a question about a case using LM Studio."""
+    from lib.database import get_case_hydrated, get_case_orders
+    from lib.llm_client import LMStudioClient, PRIORITY_INTERACTIVE
+
+    case = get_case_hydrated(case_id)
+    if not case:
+        return JSONResponse(status_code=404, content={"detail": "Case not found"})
+
+    question = body.get("question", "").strip()
+    if not question:
+        return JSONResponse(status_code=400, content={"detail": "No question provided"})
+
+    orders = get_case_orders(case_id)
+    order_lines = "\n".join(
+        f"  - {o.get('Product_Description','?')} | €{o.get('Product_Value',0)} | "
+        f"VAT {(o.get('VAT_Rate',0) or 0)*100:.0f}% | "
+        f"{o.get('Country_Origin','?')} → {o.get('Country_Destination','?')}"
+        for o in orders
+    )
+    engine_info = (
+        f"Engine scores: VAT Ratio={case.get('Engine_VAT_Ratio',0):.2f}, "
+        f"ML Watchlist={case.get('Engine_ML_Watchlist',0):.2f}, "
+        f"IE Seller={case.get('Engine_IE_Seller_Watchlist',0):.2f}, "
+        f"Vagueness={case.get('Engine_Description_Vagueness',0):.2f}"
+    )
+    ai_analysis = case.get("AI_Analysis") or "No AI analysis performed yet."
+    comm = case.get("Communication", []) or []
+    comm_text = "\n".join(
+        f"  [{c.get('date','')}] {c.get('from','')}: {c.get('action','')} — {c.get('message','')}"
+        for c in comm[-10:]
+    ) if comm else "No communication log entries."
+
+    role = body.get("role", "customs")
+
+    case_context = f"""CASE: {case_id}
+Status: {case.get('Status')}
+Seller: {case.get('Seller_Name')} ({case.get('Country_Origin')})
+Destination: {case.get('Country_Destination')}
+Category: {case.get('HS_Product_Category')}
+Overall Risk Score: {case.get('Overall_Case_Risk_Score',0):.2f} ({case.get('Overall_Case_Risk_Level','?')})
+{engine_info}
+VAT Problem Type: {case.get('VAT_Problem_Type','None')}
+
+Orders ({len(orders)}):
+{order_lines}
+
+AI VAT Fraud Detection Analysis: {ai_analysis}
+
+Communication log:
+{comm_text}"""
+
+    if role == "tax":
+        system_prompt = f"""You are a Tax Authority AI assistant specialised in VAT compliance and tax fraud detection.
+You work for the Irish Revenue Commissioners. Your expertise includes:
+- EU VAT Directive (2006/112/EC) and its application to e-commerce
+- Irish VAT rates (standard 23%, reduced 13.5%/9%, zero-rated, exempt categories)
+- VAT MOSS/IOSS schemes for cross-border B2C e-commerce
+- Common VAT fraud patterns: misclassification, undervaluation, carousel fraud
+- Transfer pricing and arm's-length principles
+
+When answering, focus on tax implications, applicable VAT rates, potential revenue loss,
+and whether the declared VAT treatment is consistent with the product category and EU legislation.
+Cite relevant VAT rules when possible. Be precise and analytical.
+
+Answer based ONLY on the case data below. If the data doesn't contain the answer, say so.
+
+{case_context}"""
+    else:
+        system_prompt = f"""You are a Customs Authority AI assistant specialised in border control and risk management.
+You work for the Irish Customs service. Your expertise includes:
+- EU customs regulations (Union Customs Code - UCC)
+- Risk profiling of shipments and sellers
+- Product classification (HS codes, Combined Nomenclature)
+- Country-of-origin risk assessment
+- Detection of smuggling, counterfeiting, and misdeclaration patterns
+- Customs procedures: release, retention, investigation escalation
+
+When answering, focus on whether goods should be released or retained, the risk profile
+of the seller and route, whether the product description matches the declared category,
+and any red flags for customs enforcement. Be direct and action-oriented.
+
+Answer based ONLY on the case data below. If the data doesn't contain the answer, say so.
+
+{case_context}"""
+
+    try:
+        client = LMStudioClient()
+        answer = await client.chat([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": question},
+        ], temperature=0.3, max_tokens=300, priority=PRIORITY_INTERACTIVE)
+        await client.aclose()
+        return {"answer": answer}
+    except Exception as e:
+        return {"answer": f"Unable to reach AI assistant: {e}"}
 
 
-@app.get("/api/tax/queue/stream")
-async def api_tax_queue_stream(request: Request):
-    """SSE stream of the Tax queue. Initial snapshot on connect, plus
-    a fresh snapshot whenever the queue changes (new AMBER listener
-    arrival, escalation from Customs adding an entry, agent run start/
-    finish, or recommendation back to Customs removing an entry)."""
-    return await _make_sse_stream(_tax_snapshot, _tax_sse)(request)
+@app.get("/api/rg/agent/queue")
+def api_rg_agent_queue():
+    """Live queue depth + current case under analysis. UI feedback only."""
+    depth = _agent_queue.qsize() if _agent_queue is not None else 0
+    return {"depth": depth, "in_progress": _agent_in_progress}
+
+
+@app.post("/api/rg/cases/{case_id}/customs-action")
+async def api_rg_customs_action(case_id: str, body: dict):
+    """
+    Customs officer action on a case.
+    body: {action: "tax_review"|"retainment"|"release"|"input_requested",
+           comment?: str, officer?: str, risk_breakdown?: dict}
+    """
+    import json as _json
+    from lib.database import get_case_by_id, update_case
+
+    case = get_case_by_id(case_id)
+    if not case:
+        return JSONResponse(status_code=404, content={"detail": "Case not found"})
+
+    action = body.get("action", "")
+    comment = body.get("comment", "")
+    officer = body.get("officer", "Customs Officer")
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+
+    status_map = {
+        # tax_review goes through the AI agent first; the worker will flip
+        # status to UNDER_REVIEW_BY_TAX once it has produced a verdict.
+        "tax_review":       STATUS.AI_INVESTIGATING,
+        "retainment":       STATUS.CLOSED,
+        "release":          STATUS.CLOSED,
+        "refused":          STATUS.CLOSED,     # officer refuses Tax recommendation
+        "input_requested":  STATUS.REQUESTED_INPUT,
+    }
+    new_status = status_map.get(action)
+    if not new_status:
+        return JSONResponse(status_code=400, content={"detail": f"Unknown action: {action}"})
+
+    # Build updates
+    updates: dict = {
+        "Status":     new_status,
+        "Update_time": now_iso,
+        "Updated_by":  officer,
+    }
+    if action in ("retainment", "release", "refused"):
+        action_map = {"retainment": "retain", "release": "release", "refused": "refuse"}
+        updates["Proposed_Action_Customs"] = action_map[action]
+        from lib.database import update_sales_order_status
+        from lib import sales_order_statuses as SO_STATUS
+        bk = case.get("Sales_Order_Business_Key")
+        if bk:
+            so_status = SO_STATUS.TO_BE_RELEASED if action == "release" else SO_STATUS.TO_BE_RETAINED
+            update_sales_order_status(bk, so_status)
+
+    # Append to communication log
+    comm = case.get("Communication", [])
+    if not isinstance(comm, list):
+        comm = []
+    comm.append({"date": now_iso, "from": "Customs Authority", "action": action, "message": comment})
+    updates["Communication"] = comm
+
+    update_case(case_id, updates)
+
+    _emit_case_updated_sse(case_id, action)
+    if action in ("retainment", "release", "refused"):
+        outcome_map = {"retainment": "retained", "release": "released", "refused": "refused"}
+        await _publish_investigation_outcome(case_id, outcome_map[action])
+    if action == "tax_review":
+        insert_agent_log({
+            "transaction_id": case_id, "seller_name": case.get("Seller_Name"),
+            "buyer_country": case.get("Country_Destination"),
+            "item_description": case.get("Product_Description"),
+            "item_category": case.get("HS_Product_Category"),
+            "value": case.get("Product_Value"), "vat_rate": case.get("VAT_Rate"),
+            "correct_vat_rate": None,
+            "verdict": "sent_to_tax",
+            "reasoning": f"Case {case_id} submitted for tax review by {officer}",
+            "legislation_refs": "[]", "sent_to_ireland": 0,
+            "processed_at": now_iso,
+        })
+        await _enqueue_for_agent(case_id)
+    return {"ok": True}
+
+
+@app.post("/api/rg/cases/{case_id}/tax-action")
+def api_rg_tax_action(case_id: str, body: dict):
+    """
+    Tax officer action on a case.
+    body: {action: "risk_confirmed"|"no_limited_risk"|"input_requested",
+           comment?: str, officer?: str, vat_category?: str}
+    """
+    import json as _json
+    from lib.database import get_case_by_id, update_case
+
+    case = get_case_by_id(case_id)
+    if not case:
+        return JSONResponse(status_code=404, content={"detail": "Case not found"})
+
+    action = body.get("action", "")
+    comment = body.get("comment", "")
+    officer = body.get("officer", "Tax Officer")
+    vat_category = body.get("vat_category")
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+
+    if action not in ("risk_confirmed", "no_limited_risk", "input_requested"):
+        return JSONResponse(status_code=400, content={"detail": f"Unknown action: {action}"})
+
+    updates: dict = {
+        "Proposed_Action_Tax": action,
+        "Update_time": now_iso,
+        "Updated_by": officer,
+    }
+    if vat_category:
+        updates["Recommended_VAT_Product_Category"] = vat_category
+
+    # Propagate status back for customs visibility
+    if action == "risk_confirmed":
+        updates["Status"] = STATUS.UNDER_REVIEW_BY_CUSTOMS
+    elif action == "no_limited_risk":
+        updates["Status"] = STATUS.UNDER_REVIEW_BY_CUSTOMS
+    elif action == "input_requested":
+        updates["Status"] = STATUS.REQUESTED_INPUT
+
+    comm = case.get("Communication", [])
+    if not isinstance(comm, list):
+        comm = []
+    comm.append({"date": now_iso, "from": "Tax Authority", "action": action, "message": comment})
+    updates["Communication"] = comm
+
+    update_case(case_id, updates)
+
+    _emit_case_updated_sse(case_id, action)
+    return {"ok": True}
+
+
+@app.post("/api/rg/cases/{case_id}/communication")
+def api_rg_add_communication(case_id: str, body: dict):
+    """
+    Add a communication entry to a case.
+    body: {from: str, action: str, message: str}
+    """
+    from lib.database import get_case_by_id, update_case
+
+    case = get_case_by_id(case_id)
+    if not case:
+        return JSONResponse(status_code=404, content={"detail": "Case not found"})
+
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    comm = case.get("Communication", [])
+    if not isinstance(comm, list):
+        comm = []
+    comm.append({
+        "date": now_iso,
+        "from": body.get("from", "System"),
+        "action": body.get("action", ""),
+        "message": body.get("message", ""),
+    })
+
+    update_case(case_id, {"Communication": comm, "Update_time": now_iso})
+
+    _emit_case_updated_sse(case_id, "communication")
+    return {"ok": True}
+
+
+@app.get("/api/rg/cases/{case_id}/communication")
+def api_rg_get_communication(case_id: str):
+    """Get communication log for a case."""
+    from lib.database import get_case_by_id
+    case = get_case_by_id(case_id)
+    if not case:
+        return JSONResponse(status_code=404, content={"detail": "Case not found"})
+    return case.get("Communication", [])
 
 
 # ── Simulation control ────────────────────────────────────────────────────────
@@ -1833,27 +1931,33 @@ def sim_pipeline():
     from lib.event_store import event_count, count_field_value
     from lib.broker import broker as _broker
     topics = [
-        SALES_ORDER_EVENT, RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME,
-        RT_SCORE, ORDER_VALIDATION, ARRIVAL_NOTIFICATION,
+        SALES_ORDER_EVENT, RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME, RT_RISK_3_OUTCOME, RT_RISK_4_OUTCOME,
+        RT_SCORE, ORDER_VALIDATION, ASSESSMENT_OUTCOME, INVESTIGATION_OUTCOME,
+        CUSTOM_OUTCOME,
         RELEASE_EVENT, RETAIN_EVENT, INVESTIGATE_EVENT,
-        AGENT_RETAIN_EVENT, AGENT_RELEASE_EVENT, RELEASE_AFTER_INVESTIGATION_EVENT,
     ]
+    # Show queue depths only when simulation has fired events; otherwise
+    # report 0 so stale factory-internal buffers don't confuse the UI.
+    show_queues = state.fired_count > 0 or state.running
+    queues = {t: (_broker.qsize(t) if show_queues else 0) for t in topics}
     return {
         "events":             {t: event_count(t) for t in topics},
-        "queues":             {t: _broker.qsize(t) for t in topics},
+        "queues":             queues,
         "stored_count":       get_transaction_count(),
-        # Two-entity model: separate counters for Customs and Tax queues.
-        "customs_queue":          len(_customs_queue),
-        "tax_queue":              len(_tax_queue),
-        "tax_queue_agent_running": sum(
-            1 for v in _tax_queue.values() if v.get("agent_status") == "agent_running"
-        ),
         "risk_flags": {
             "rt_risk_1_flagged": count_field_value(RT_RISK_1_OUTCOME, "outcome.flagged", True),
             "rt_risk_2_flagged": count_field_value(RT_RISK_2_OUTCOME, "outcome.flagged", True),
+            "rt_risk_3_flagged": count_field_value(RT_RISK_3_OUTCOME, "outcome.flagged", True),
+            "rt_risk_4_flagged": count_field_value(RT_RISK_4_OUTCOME, "outcome.flagged", True),
             "rt_score_green":    count_field_value(RT_SCORE, "outcome.risk_score", "green"),
             "rt_score_amber":    count_field_value(RT_SCORE, "outcome.risk_score", "amber"),
             "rt_score_red":      count_field_value(RT_SCORE, "outcome.risk_score", "red"),
+        },
+        "custom_outcome_status": {
+            "automated_release": count_field_value(CUSTOM_OUTCOME, "outcome.status", "automated_release"),
+            "automated_retain":  count_field_value(CUSTOM_OUTCOME, "outcome.status", "automated_retain"),
+            "custom_release":    count_field_value(CUSTOM_OUTCOME, "outcome.status", "custom_release"),
+            "custom_retain":     count_field_value(CUSTOM_OUTCOME, "outcome.status", "custom_retain"),
         },
     }
 
@@ -1872,15 +1976,26 @@ def sim_start():
     from lib.config import SIM_END_DT
     from lib.event_store import flush_events
     from lib.alarm_checker import bootstrap_scenario_alarm
+    from lib.database import seed_open_cases_if_empty, get_all_cases_hydrated
     if state.sim_time >= SIM_END_DT:
         return {"ok": False, "reason": "simulation already finished — reset first"}
+    seeded = 0
     # Flush persisted events and bootstrap alarm on first launch (fired_count == 0).
     # Pause → resume does not flush (fired_count > 0 at that point).
     if state.fired_count == 0:
         flush_events()
         bootstrap_scenario_alarm()
+        # Pre-load open cases from the persisted seed DB so officers
+        # have something to triage from t=0. No-op if cases are already
+        # present (e.g. resume after pause without reset).
+        seeded = seed_open_cases_if_empty()
+        if seeded:
+            # Push each seeded case as a new_case event so the frontend
+            # caseStore upserts them without needing a full re-fetch.
+            for case in get_all_cases_hydrated(limit=seeded):
+                _push_rg_case_sse({"event": "new_case", "case": case})
     state.running = True
-    return {"ok": True, "status": state.to_dict()}
+    return {"ok": True, "status": state.to_dict(), "seeded_cases": seeded}
 
 
 @app.post("/api/simulation/pause")
@@ -1913,7 +2028,14 @@ def sim_reset():
     state.reset()
     reset_simulation_db()
     reset_alarms()          # removes March+ rows, keeps Sep–Feb history
+    from lib.database import reset_cases
+    reset_cases()           # clear investigation cases
+    _push_rg_case_sse({"event": "cases_reset"})  # notify C&T Risk Management System clients
     flush_events()
+    from lib.broker import broker as _b
+    drained = _b.drain_all()
+    if drained:
+        print(f"  [reset] drained {drained} stale messages from broker queues")
     # Re-seed historical data if it was wiped (e.g. first run or manual DB delete)
     if historical_transaction_count() == 0:
         seed_european_custom_db()
@@ -1929,18 +2051,12 @@ def sim_reset():
         if not t.done():
             t.cancel()
     _inflight_factory_tasks.clear()
-    # Clear both entity queues and push fresh empty snapshots on each SSE
-    # stream so the Revenue Guardian Customs and Tax Authority pages drop
-    # all the stale rows immediately.
-    _customs_queue.clear()
-    _tax_queue.clear()
-    _broadcast_customs_update()
-    _broadcast_tax_update()
     for sse_q in list(_sse_queues):
         try:
             sse_q.put_nowait("__reset__")
         except asyncio.QueueFull:
             pass
+    _push_rg_case_sse({"event": "reset"})
     return {"ok": True, "status": state.to_dict()}
 
 
@@ -1965,6 +2081,16 @@ if _ireland_app_dir.exists():
               name="ireland_app")
 
 
+@app.get("/api/debug/queues")
+def debug_queues():
+    from lib.broker import broker as _b
+    result = {}
+    for topic, queues in _b._queues.items():
+        if queues:
+            result[topic] = [q.qsize() for q in queues]
+    return result
+
+
 # ── Main frontend (must be absolutely last) ───────────────────────────────────
 # Serves the Vite build.  Static assets (JS/CSS) are served directly;
 # all other GET requests fall back to index.html for client-side routing.
@@ -1983,3 +2109,4 @@ if _frontend_dist.exists():
         if candidate.is_file():
             return _FileResponse(str(candidate))
         return _FileResponse(str(_frontend_dist / "index.html"))
+

@@ -182,6 +182,28 @@ function BrokerNode({ label, topicKey, count, children, accent, sm, tooltip, wid
   )
 }
 
+// Per-status breakdown rendered as BrokerNode children for the
+// CUSTOM_OUTCOME tile. Three small rows with a coloured dot.
+function CustomOutcomeBreakdown({ s }) {
+  const Row = ({ color, label, n }) => (
+    <div style={{
+      display: 'flex', justifyContent: 'space-between', gap: 6,
+      fontSize: 8, lineHeight: 1.3,
+    }}>
+      <span style={{ color }}>● {label}</span>
+      <span style={{ fontWeight: 700, color: 'var(--text-primary)' }}>{fmt(n || 0)}</span>
+    </div>
+  )
+  return (
+    <div style={{ marginTop: 4, paddingTop: 4, borderTop: '1px dashed var(--border-light)', display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <Row color="#198754" label="automated_release" n={s.automated_release} />
+      <Row color="#fd7e14" label="automated_retain"  n={s.automated_retain} />
+      <Row color="#0d6efd" label="custom_release"    n={s.custom_release} />
+      <Row color="#dc3545" label="custom_retain"     n={s.custom_retain} />
+    </div>
+  )
+}
+
 function FactoryNode({ label, description, icon, accent, sm, tooltip, width, count, countLabel }) {
   const defaultMinW = sm ? 86 : 120
   // accent is the inner-content + border color; falls back to the neutral
@@ -595,32 +617,9 @@ function MiddleSection({ ev, rf, customs, tax, taxRunning, stored, newStored, H,
   const QUEUE_CX  = QUEUE_LEFT  + QUEUE_W  / 2
   const OFCR_CX   = OFCR_LEFT   + OFCR_W   / 2
 
-  // ── Arrival → Post-Inv Release supplementary arrow ───────────────────────
-  // The Post-Inv Release factory correlates Investigation Clearance + Order
-  // Validation + Arrival Notification. The OV/Clearance branches arrive via
-  // the Customs Officer release path; this draws the missing Arrival branch
-  // as a U-shape that exits the upper-band Arrival broker area, descends
-  // BELOW everything (Tax Office zone + VAT Agent + inter-zone arrows),
-  // runs horizontally under them, and rises back up into the Post-Inv
-  // Release block from below. Routing the arrow under the schema avoids
-  // crossing the Customs/Tax zones and the escalate / recommend arrows.
-  //
-  // ARRIVAL_START_X is the negative offset (in MiddleSection-local
-  // coordinates) of the FanIn spine corner where the existing Arrival arrow
-  // turns upward to feed Release Factory. Derived statically from the fixed
-  // upper-band widths between MiddleSection's left edge and the FanIn:
-  //   AUTOMATED brokers column (OUT_BROKER_W = 170)
-  // + FanOut SVG (48)
-  // + Release Factory wrapper (≈ 135 — sm factory + padding)
-  // + FanIn SVG (60), spine at width-8 = 52 from its right edge
-  // Start point ≈ -(170 + 48 + 135 + 60 - 52) ≈ -361.
-  const ARRIVAL_START_X = -361
-  const ARRIVAL_BELOW_Y = AGENT_BOTTOM + 24    // 16 px below the VAT Agent
-
-  // Effective canvas height — extends below H to accommodate the Tax row,
-  // the VAT Agent stacked below it, AND the arrival U-shape's horizontal
-  // leg that runs under everything.
-  const Heff = Math.max(H, ARRIVAL_BELOW_Y + 16)
+  // Effective canvas height — extends below H to accommodate the Tax row
+  // and the VAT Agent stacked below it.
+  const Heff = Math.max(H, AGENT_BOTTOM + 24)
 
   // ── Loop-back routing ────────────────────────────────────────────────────
   // Vertical legs MUST lie outside the after-Inv broker x range
@@ -787,20 +786,7 @@ function MiddleSection({ ev, rf, customs, tax, taxRunning, stored, newStored, H,
         <text x={OFCR_CX + CONSULT_DX + 4} y={(CONSULT_TOP + CONSULT_BOT) / 2}
               fontSize={9} fill={indigo} textAnchor="start" fontWeight={700} dominantBaseline="middle">verdict</text>
 
-        {/* Arrival Notification → Post-Inv Release supplementary input.
-            U-shape: starts at the FanIn corner where the existing Arrival
-            arrow turns up to Release Factory, descends BELOW the entire
-            bottom band (Customs zone + Tax zone + VAT Agent + inter-zone
-            arrows), runs right under them, then rises into the bottom edge
-            of the Post-Inv Release block. Routing under the schema keeps
-            the line clear of the escalate / recommend / consult arrows.
-            Drawn at negative x — relies on the SVG's overflow:visible. */}
-        <polyline
-          points={`${ARRIVAL_START_X},${Y_INV} ${ARRIVAL_START_X},${ARRIVAL_BELOW_Y} ${POSTINV_CX},${ARRIVAL_BELOW_Y} ${POSTINV_CX},${CUSTOMS_ROW_BOT}`}
-          stroke={grey} strokeWidth={stroke} fill="none" />
-        <Arrowhead x={POSTINV_CX} y={CUSTOMS_ROW_BOT} dir="up" />
-        <text x={ARRIVAL_START_X + 4} y={Y_INV - 6}
-              fontSize={9} fill="var(--text-muted)" textAnchor="start" fontWeight={700}>arrival</text>
+        {/* Arrival Notification → Post-Inv Release arrow removed (Goods Transport flow eliminated) */}
       </svg>
 
       {/* ── DB Store · Hub dashed zone (mirrors Order Validation / RT Risk / Transport on the left) ── */}
@@ -822,11 +808,14 @@ function MiddleSection({ ev, rf, customs, tax, taxRunning, stored, newStored, H,
           display: 'flex', flexDirection: 'column', alignItems: 'center',
           gap: 6, height: 'calc(100% - 32px)', justifyContent: 'center',
         }}>
-          <FactoryNode icon="💾" label="DB Store Factory" description="Insert + flag suspicious" sm
-            tooltip="DB Store Factory — subscribes to Sales Order Release, Release Post Inv. and Retain Post Inv. Inserts into european_custom.db and pushes to the live queue / SSE stream." />
+          <FactoryNode icon="🚪" label="Exit Process Factory" description="emits CUSTOM_OUTCOME" sm
+            tooltip="Exit Process Factory — subscribes to Assessment Outcome (release + retain routes) and Investigation Outcome. Emits one CUSTOM_OUTCOME event per completed order; persistence to the legacy hub is deactivated." />
           <Arrow down />
-          <DBSinkNode count={stored} newCount={newStored}
-            tooltip={`Custom Data Hub — ${fmt(stored)} total records (includes historical seed). ${fmt(newStored)} new records stored since the last simulation reset.`} />
+          <BrokerNode label="Custom Outcome" topicKey="CUSTOM_OUTCOME" sm
+            count={customTotal}
+            tooltip={`Terminal CUSTOM_OUTCOME broker — ${customTotal} events. Status breakdown: automated_release ${customStatus.automated_release || 0}, custom_release ${customStatus.custom_release || 0}, custom_retain ${customStatus.custom_retain || 0}.`}>
+            <CustomOutcomeBreakdown s={customStatus} />
+          </BrokerNode>
         </div>
       </div>
 
@@ -909,11 +898,11 @@ function MiddleSection({ ev, rf, customs, tax, taxRunning, stored, newStored, H,
           tooltip="Customs Queue — in-memory dict of transactions awaiting Customs officer action (release, retain, or escalate to Tax). Depth includes Tax-recommended items returned for the final Customs decision." />
       </div>
 
-      {/* Customs Officer console — Revenue Guardian Customs page on :8080 */}
+      {/* Customs Officer console — C&T Risk Management System Customs page on :8080 */}
       <div style={{ position: 'absolute', top: CUSTOMS_ROW_TOP, left: OFCR_LEFT, width: OFCR_W }}>
-        <FactoryNode icon="🛃" label="Customs Officer" description="@ revenue-guardian /customs" sm width={OFCR_W}
+        <FactoryNode icon="🛃" label="Customs Officer" description="@ C&T Risk Mgmt /customs" sm width={OFCR_W}
           accent={indigo}
-          tooltip="Customs Officer Console — Revenue Guardian Customs page on http://localhost:8080. The officer reviews each Customs queue item and either releases, retains, or escalates the case to the Tax authority for advice. Customs is master — its decision is the terminal event." />
+          tooltip="Customs Officer Console — C&T Risk Management System Customs page on http://localhost:8080. The officer reviews each Customs queue item and either releases, retains, or escalates the case to the Tax authority for advice. Customs is master — its decision is the terminal event." />
       </div>
 
       {/* ── Tax row blocks ── */}
@@ -930,11 +919,11 @@ function MiddleSection({ ev, rf, customs, tax, taxRunning, stored, newStored, H,
           tooltip="Tax Queue — in-memory dict of transactions awaiting Tax officer analysis. Includes both AMBER-routed items and items escalated from the Customs queue." />
       </div>
 
-      {/* Tax Officer console — Revenue Guardian Tax page on :8080 */}
+      {/* Tax Officer console — C&T Risk Management System Tax page on :8080 */}
       <div style={{ position: 'absolute', top: TAX_ROW_TOP, left: OFCR_LEFT, width: OFCR_W }}>
-        <FactoryNode icon="🧑‍⚖️" label="Tax Officer" description="@ revenue-guardian /tax" sm width={OFCR_W}
+        <FactoryNode icon="🧑‍⚖️" label="Tax Officer" description="@ C&T Risk Mgmt /tax" sm width={OFCR_W}
           accent={indigo}
-          tooltip="Tax Officer Console — Revenue Guardian Tax page on http://localhost:8080. The Tax officer triggers the VAT Fraud Detection Agent, then issues a release / retain RECOMMENDATION which is sent back to the Customs queue for the final decision." />
+          tooltip="Tax Officer Console — C&T Risk Management System Tax page on http://localhost:8080. The Tax officer triggers the VAT Fraud Detection Agent, then issues a release / retain RECOMMENDATION which is sent back to the Customs queue for the final decision." />
       </div>
 
       {/* VAT Fraud Detection Agent — sits BELOW the Tax Officer as a side
@@ -943,7 +932,7 @@ function MiddleSection({ ev, rf, customs, tax, taxRunning, stored, newStored, H,
       <div style={{ position: 'absolute', top: AGENT_TOP, left: AGENT_LEFT, width: AGENT_W }}>
         <FactoryNode icon="🤖" label="VAT Fraud Detection Agent" description="LM Studio · manually triggered" sm width={AGENT_W}
           count={taxRunning} countLabel="under analysis"
-          tooltip="VAT Fraud Detection Agent — runs the local LLM (LM Studio) on demand when the Tax officer clicks Run Agent in the Revenue Guardian UI. The count shows how many Tax queue items are currently being analysed (agent_status = agent_running)." />
+          tooltip="VAT Fraud Detection Agent — runs the local LLM (LM Studio) on demand when the Tax officer clicks Run Agent in the C&T Risk Management System UI. The count shows how many Tax queue items are currently being analysed (agent_status = agent_running)." />
       </div>
 
       {/* Investigation Clearance broker — vertically centered on Y_CUSTOMS.
@@ -955,10 +944,10 @@ function MiddleSection({ ev, rf, customs, tax, taxRunning, stored, newStored, H,
           tooltip="Investigation Clearance — transactions the Customs officer cleared for release. Forwarded to the Post-Investigation Release factory." />
       </div>
 
-      {/* Post-Investigation Release Factory */}
+      {/* Post-Investigation Automated Assessment Factory */}
       <div style={{ position: 'absolute', top: CUSTOMS_ROW_TOP, left: POSTINV_LEFT, width: POSTINV_W }}>
         <FactoryNode icon="🔓" label="Post-Inv. Release" description="cleared + OV + arrival" sm width={POSTINV_W}
-          tooltip="Post-Investigation Release Factory — waits for OV + Arrival on cleared transactions, then emits a Release After Investigation event." />
+          tooltip="Post-Investigation Automated Assessment Factory — waits for OV + Arrival on cleared transactions, then emits a Release After Investigation event." />
       </div>
     </div>
   )
@@ -980,12 +969,12 @@ function KpiStrip({ pipeline }) {
   const retained = (ev.retain_event      || 0)
                  + (ev.agent_retain_event || 0)
 
-  // Investigated: investigations the agent has completed (produced a verdict for)
-  const investigated = (ev.agent_retain_event  || 0)
-                     + (ev.agent_release_event || 0)
+  // Investigated: officer decisions that completed an investigation
+  // (custom_release + custom_retain from the Exit Process Factory)
+  const co = pipeline?.custom_outcome_status || {}
+  const investigated = (co.custom_release || 0) + (co.custom_retain || 0)
 
-  // Under investigation: cumulative amber-routed minus completed = currently in-flight
-  // (in the Tax queue or being processed by the VAT Fraud Detection Agent)
+  // Under investigation: amber-routed minus completed = currently in-flight
   const underInvestigation = Math.max(
     0,
     (ev.investigate_event || 0) - investigated
@@ -998,10 +987,10 @@ function KpiStrip({ pipeline }) {
       tooltip: 'Sales Order Release + Release Post Inv. — total transactions cleared for release (both automated and post-investigation).' },
     { key: 'retained',     label: 'Retained',           value: retained,          color: '#c0392b',
       tooltip: 'Sales Order Retained + Retain Post Inv. — total transactions flagged as suspicious and retained (both automated and post-investigation).' },
-    { key: 'investigated', label: 'Investigated',       value: investigated,      color: '#e6820a',
-      tooltip: 'Investigations the VAT Fraud Detection Agent has completed (produced a verdict: correct, uncertain, or incorrect).' },
-    { key: 'underInv',     label: 'Under Investigation', value: underInvestigation, color: '#9c27b0',
+    { key: 'underInv',     label: 'Under Investigation', value: underInvestigation, color: '#e6820a',
       tooltip: 'Transactions currently in the Tax queue — waiting for the Tax officer to act or being analysed by the VAT Fraud Detection Agent.' },
+    { key: 'investigated', label: 'Investigated',       value: investigated,      color: '#9c27b0',
+      tooltip: 'Investigations the VAT Fraud Detection Agent has completed (produced a verdict: correct, uncertain, or incorrect).' },
   ]
 
   return (
@@ -1014,6 +1003,7 @@ function KpiStrip({ pipeline }) {
             background: t.color + '10', border: `1.5px solid ${t.color}55`,
             borderRadius: 'var(--radius)', padding: '10px 14px',
             cursor: 'help',
+            display: 'flex', flexDirection: 'column', justifyContent: 'flex-end',
           }}>
             <div style={{
               fontSize: 10, color: t.color, fontWeight: 700,
@@ -1033,6 +1023,63 @@ function KpiStrip({ pipeline }) {
 
 function PipelineDiagram({ pipeline }) {
   const pipelineRef = useRef(null)
+  const entryRef = useRef(null)
+  const ctRef = useRef(null)
+  const dbStoreRef = useRef(null)
+  const invOutcomeRef = useRef(null)
+  const dbHubRef = useRef(null)
+  const containerRef = useRef(null)
+  const [overlayPaths, setOverlayPaths] = useState(null)
+
+  // Measure element positions and compute SVG overlay paths
+  useEffect(() => {
+    const update = () => {
+      const container = containerRef.current
+      const entry = entryRef.current
+      const ct = ctRef.current
+      const dbStore = dbStoreRef.current
+      const invOut = invOutcomeRef.current
+      if (!container || !entry || !ct) return
+      const cRect = container.getBoundingClientRect()
+      const eRect = entry.getBoundingClientRect()
+      const ctRect = ct.getBoundingClientRect()
+      // Entry center-right → above pipeline → C&T center-top
+      const ex = eRect.right - cRect.left
+      const ey = eRect.top + eRect.height / 2 - cRect.top
+      const ctx = ctRect.left + ctRect.width / 2 - cRect.left
+      const cty = ctRect.top - cRect.top
+      // Measured positions for overlay arrows
+      let dbx = 0, dby = 0, dbTop = 0
+      let ix = 0, iy = 0, iLeft = 0, iBottom = 0
+      let hubRight = 0, hubBottom = 0
+      let ctBottom = 0
+      if (dbStore && invOut) {
+        const dbRect = dbStore.getBoundingClientRect()
+        const iRect = invOut.getBoundingClientRect()
+        dbx = dbRect.left + dbRect.width / 2 - cRect.left
+        dby = dbRect.bottom - cRect.top                        // bottom edge — arrow arrives from below
+        dbTop = dbRect.top - cRect.top
+        ix = iRect.right - cRect.left
+        iy = iRect.top + iRect.height / 2 - cRect.top
+        iLeft = iRect.left + iRect.width / 2 - cRect.left
+        iBottom = iRect.bottom - cRect.top
+      }
+      ctBottom = ctRect.bottom - cRect.top
+      const hub = dbHubRef.current
+      if (hub) {
+        const hRect = hub.getBoundingClientRect()
+        hubRight = hRect.right - cRect.left + 8
+        hubBottom = hRect.bottom - cRect.top + 8
+      }
+      const containerH = cRect.height
+      setOverlayPaths({ ex, ey, ctx, cty, dbx, dby, dbTop, ix, iy, iLeft, iBottom, ctBottom, hubRight, hubBottom, containerH })
+    }
+    update()
+    const id = setInterval(update, 2000)
+    return () => clearInterval(id)
+  })
+
+  // Sync the top scrollbar spacer width with the pipeline content width
   useEffect(() => {
     const syncWidth = () => {
       const el = pipelineRef.current
@@ -1055,37 +1102,35 @@ function PipelineDiagram({ pipeline }) {
   const tax        = pipeline?.tax_queue              ?? null
   const taxRunning = pipeline?.tax_queue_agent_running ?? null
   const stored     = pipeline?.stored_count           ?? null
+  const customStatus = pipeline?.custom_outcome_status ?? { automated_release: 0, automated_retain: 0, custom_release: 0, custom_retain: 0 }
+  const customTotal  = (customStatus.automated_release || 0)
+                     + (customStatus.automated_retain  || 0)
+                     + (customStatus.custom_release    || 0)
+                     + (customStatus.custom_retain     || 0)
 
-  // Row 1: three parallel processing zones
-  // AN_H is taller so the Investigation Notification broker aligns
-  // horizontally with the Tax Listener in the MiddleSection.
-  const OV_H = 94, RT_H = 230, AN_H = 252, LGAP = 10
-  const ROW1_H = OV_H + LGAP + RT_H + LGAP + AN_H
+  // Row 1: three processing zones stacked (OV + RT + MS)
+  const OV_H = 94, RT_H = 310, MS_H = 110, LGAP = 10
+  const ROW1_H = OV_H + LGAP + RT_H + LGAP + MS_H
   const yOV = OV_H / 2
   const yRT = OV_H + LGAP + RT_H / 2
-  const yAN = OV_H + LGAP + RT_H + LGAP + AN_H / 2
+  const yMS = OV_H + LGAP + RT_H + LGAP + MS_H / 2
 
-  // Shared width for the three top zones so Sales Order Validation and
-  // Goods Transport match the Real-Time Risk Assessment zone
-  const ZONE_W = 440
-  // Shared width for the Sales Order Validation and Goods Transport factories
-  // so they match each other. Each fills its parent zone's content area
-  // (ZONE_W − 2× zone padding 10 = 420). With justifyContent: center the
-  // factory is visually centered AND its right edge lines up with the
-  // Risk Score Consolidation factory on the right side of the Real-Time
-  // Risk Assessment zone (also bounded by the same zone padding).
-  const SIDE_FACTORY_W = 420
-  // Shared width for the three row-1 output brokers
-  // (Sales Order Validation / RT Score / Goods Arrival Notification)
+  // Zone width wraps the widest factory + fan-out + padding
+  const ZONE_W = 280
+  // Factory widths sized to their text content — no wider than needed.
+  const OV_FACTORY_W = 220    // "Sales Order Validation"
+  const RT_FACTORY_W = 180    // "RT Risk As. 1/2/4"
+  // Shared width for the output brokers
   const OUT_BROKER_W = 170
 
-  // RT zone internal row geometry (two stacked broker rows + fan-in to consolidation)
-  const RT_ROW_H   = 84
-  const RT_ROW_GAP = 10
-  const RT_STACK_H = RT_ROW_H * 2 + RT_ROW_GAP    // 178
-  const rtTopY     = RT_ROW_H / 2                  // 42  — center of row 1
-  const rtBotY     = RT_ROW_H + RT_ROW_GAP + RT_ROW_H / 2  // 136 — center of row 2
-  const rtOutY     = RT_STACK_H / 2                // 89  — fan-in output
+  // RT zone internal row geometry (three stacked engine rows)
+  const RT_ROW_H   = 78
+  const RT_ROW_GAP = 8
+  const RT_STACK_H = RT_ROW_H * 3 + RT_ROW_GAP * 2  // 250
+  const rtTopY     = RT_ROW_H / 2                     // 39  — center of row 1
+  const rtMidY     = RT_ROW_H + RT_ROW_GAP + RT_ROW_H / 2  // 125 — center of row 2
+  const rtBotY     = (RT_ROW_H + RT_ROW_GAP) * 2 + RT_ROW_H / 2  // 211 — center of row 3
+  const rtOutY     = RT_STACK_H / 2                    // 125 — fan-in output
 
   // Terminal-event sum = number of transactions stored to the DB since reset
   const newStored =
@@ -1124,7 +1169,7 @@ function PipelineDiagram({ pipeline }) {
 
       <div ref={pipelineRef} className="pipeline-scroll" style={{
         overflowX: 'auto', overflowY: 'hidden',
-        padding: '20px 20px 20px',
+        padding: '20px 20px 60px',
         borderBottom: '1px solid var(--border-light)',
       }}
         onScroll={(e) => {
@@ -1134,33 +1179,33 @@ function PipelineDiagram({ pipeline }) {
       >
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 'max-content' }}>
 
-          {/* ══ MAIN FLOW — single horizontal row: Entry → zones → brokers → Release Factory → event brokers → DB Store ══
+          {/* ══ MAIN FLOW — single horizontal row: Entry → zones → brokers → Automated Assessment Factory → event brokers → DB Store ══
               alignItems is "flex-start" so the LEFT columns (all natural height = ROW1_H)
               stay at the top of the row even when the MiddleSection grows taller to
               accommodate the VAT Fraud Detection Agent stacked under the Tax Officer.
               With center alignment the LEFT side would shift downward by
               (Heff - ROW1_H) / 2 and break alignment with MiddleSection's absolute
               children. */}
-          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 0 }}>
+          <div ref={containerRef} style={{ display: 'flex', alignItems: 'flex-start', gap: 0, position: 'relative' }}>
 
-            {/* Entry Broker — vertically centered on yRT (= ROW1_H/2) so it
-                lines up with the RT_Score output broker on the same horizontal. */}
-            <div style={{ height: ROW1_H, display: 'flex', alignItems: 'center' }}>
+            {/* Entry Broker — anchored at yRT so it aligns horizontally with
+                RT Risk Outcome and Automated Assessment Factory. */}
+            <div style={{ height: ROW1_H, paddingTop: Math.max(0, yRT - 55), boxSizing: 'border-box' }}>
               <Zone label="Entry">
-                <BrokerNode label="Sales-order Event" topicKey="SALES_ORDER"
-                  count={ev.sales_order_event} queueSize={q.sales_order_event} sm />
+                <div ref={entryRef}>
+                  <BrokerNode label="Sales-order Event" topicKey="SALES_ORDER"
+                    count={ev.sales_order_event} queueSize={q.sales_order_event} sm />
+                </div>
               </Zone>
             </div>
 
-            {/* FanOut: solid grey → Sales Order Validation + Real-Time Risk
-                Assessment | dashed grey → Goods Transport (the spine segment
-                between Real-Time Risk Assessment and Goods Transport is
-                dashed too) */}
-            <FanOutMixedSVG height={ROW1_H} width={48} targets={[
-              { y: yOV, dashed: false },
-              { y: yRT, dashed: false },
-              { y: yAN, dashed: true  },
-            ]} />
+            {/* FanOut: Entry → Sales Order Validation + RT Risk Assessment + MS Risk Monitors */}
+            <FanOutMixedSVG height={ROW1_H} width={48}
+              targets={[
+                { y: yOV, dashed: false },
+                { y: yRT, dashed: false },
+                { y: yMS, dashed: true },
+              ]} />
 
             {/* Three parallel zones stacked — all at ZONE_W so Row 1 is visually aligned */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
@@ -1169,7 +1214,7 @@ function PipelineDiagram({ pipeline }) {
                 <Zone label="Sales Order Validation" style={{ width: ZONE_W, boxSizing: 'border-box' }}>
                   <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
                     <FactoryNode icon="✅" label="Sales Order Validation"
-                      description="3–5 s · unlimited concurrency" sm width={SIDE_FACTORY_W}
+                      description="3–5 s · unlimited concurrency" sm width={OV_FACTORY_W}
                       tooltip="Sales Order Validation Factory — async per-order task with uniform 3–5 s delay. Emits ORDER_VALIDATION events." />
                   </div>
                 </Zone>
@@ -1182,120 +1227,231 @@ function PipelineDiagram({ pipeline }) {
                       small upward translate balances the gap on either side
                       without affecting layout — the children stay centered on
                       their flex row, the whole row just shifts up by 18 px. */}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 0, height: '100%', justifyContent: 'flex-end', transform: 'translateY(-18px)' }}>
-                    {/* Entry fan-out — mirrors the fan-in on the right */}
-                    <FanOutSVG height={RT_STACK_H} targetYs={[rtTopY, rtBotY]} width={24} />
-                    {/* Stacked RT1 + RT2 rows */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 0, height: '100%', justifyContent: 'center', transform: 'translateY(-14px)' }}>
+                    {/* Internal fan-out for 3 engines */}
+                    <FanOutSVG height={RT_STACK_H} targetYs={[rtTopY, rtMidY, rtBotY]} width={24} />
+                    {/* Stacked RT1 + RT2 + RT4 engine factories with arrows */}
                     <div style={{ display: 'flex', flexDirection: 'column', gap: RT_ROW_GAP }}>
-                      <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <FactoryNode icon="⚖️" label="RT Risk As. 1" description="VAT ratio deviation" sm
-                          tooltip="RT Risk Assessment 1 — flags transactions whose VAT-to-value ratio deviates from the supplier's historical baseline." />
+                      <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <FactoryNode icon="⚖️" label="VAT Ratio Monitor" description="7-day vs 8-week baseline" sm width={RT_FACTORY_W}
+                          tooltip="VAT Ratio Monitor — flags transactions whose VAT-to-value ratio deviates from the supplier's historical baseline (7-day window vs 8-week average). Binary risk: 0.0 or 1.0." />
                         <Arrow />
-                        <BrokerNode label="RT Risk 1 Outcome" topicKey="RT_RISK_1_OUTCOME"
-                          count={ev.rt_risk_1_outcome} sm
-                          tooltip="RT_RISK_1_OUTCOME — one event per transaction with the VAT-ratio flag result.">
-                          <FlaggedBadge flagged={rf.rt_risk_1_flagged} total={ev.rt_risk_1_outcome} />
-                        </BrokerNode>
                       </div>
-                      <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <FactoryNode icon="🔍" label="RT Risk As. 2" description="Watchlist lookup" sm
-                          tooltip="RT Risk Assessment 2 — flags transactions whose seller or route appears on the active watchlist." />
+                      <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <FactoryNode icon="🔍" label="ML Risk Classifier" description="4-tuple rule lookup" sm width={RT_FACTORY_W}
+                          tooltip="ML Risk Classifier — looks up the 4-tuple (seller × origin × category × destination) against ml_risk_rules. Returns a continuous risk score 0–1 plus per-dimension weights." />
                         <Arrow />
-                        <BrokerNode label="RT Risk 2 Outcome" topicKey="RT_RISK_2_OUTCOME"
-                          count={ev.rt_risk_2_outcome} sm
-                          tooltip="RT_RISK_2_OUTCOME — one event per transaction with the watchlist lookup result.">
-                          <FlaggedBadge flagged={rf.rt_risk_2_flagged} total={ev.rt_risk_2_outcome} />
-                        </BrokerNode>
+                      </div>
+                      <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <FactoryNode icon="📝" label="Vagueness Detector" description="product description NLP" sm width={RT_FACTORY_W}
+                          tooltip="Vagueness Detector — scores how vague or generic the product description is (0 = specific, 1 = vague). Uses sentence embeddings (all-MiniLM-L6-v2) and cosine similarity to a vague-text anchor." />
+                        <Arrow />
                       </div>
                     </div>
-                    {/* FanIn: 2 rows → Risk Score Consolidation */}
-                    <FanInSVG height={RT_STACK_H} inputYs={[rtTopY, rtBotY]} outputY={rtOutY} width={36} />
-                    {/* Risk Score Consolidation — horizontally to the right of the two assessment rows */}
-                    <FactoryNode icon="🔄" label="Risk Score Consolidation" description="GREEN / AMBER / RED" sm
-                      tooltip="Risk Score Consolidation — combines RT1 + RT2 into a single risk score: GREEN (none flagged), AMBER (one), RED (both)." />
                   </div>
                 </Zone>
               </div>
 
-              <div style={{ height: AN_H, display: 'flex', alignItems: 'center' }}>
-                <Zone label="Goods Transport" style={{ width: ZONE_W, boxSizing: 'border-box' }}>
-                  <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
-                    <FactoryNode icon="🚢" label="Goods Transport"
-                      description="exp. delay ~60 s · unlimited concurrency" sm width={SIDE_FACTORY_W}
-                      tooltip="Goods Transport / Arrival Notification — async per-order task with exponential-delay arrival (~60 s mean). Emits ARRIVAL_NOTIFICATION events." />
+              {/* Member State Risk Monitors — separate dashed zone */}
+              <div style={{ height: MS_H, display: 'flex', alignItems: 'center' }}>
+                <div style={{
+                  width: ZONE_W, height: '100%', boxSizing: 'border-box',
+                  border: '1px dashed #8fb8de', borderRadius: 6,
+                  padding: '6px 10px',
+                  background: '#f6f9fc',
+                }}>
+                  <div style={{
+                    fontSize: 9, fontWeight: 700, color: '#8fb8de',
+                    textTransform: 'uppercase', letterSpacing: '0.08em',
+                    textAlign: 'center', marginBottom: 4,
+                  }}>Member State Risk Monitors</div>
+                  <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: 'calc(100% - 24px)' }}>
+                    <FactoryNode icon="🇮🇪" label="IE Seller Watchlist" description="1–5 s · Ireland only" sm width={RT_FACTORY_W}
+                      tooltip="IE Seller Watchlist — Ireland-specific watchlist managed by the Irish customs authority. Only processes IE-bound orders; others are silently dropped. Uniform 1–5 s latency simulating a remote server. Can arrive after the assessment timer (3 s), demonstrating late-arriving engine results." />
+                    <div style={{ width: 8 }} />
+                    <Arrow />
                   </div>
-                </Zone>
+                </div>
               </div>
 
             </div>
 
             {/* Arrows: zones → brokers */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
-              <div style={{ height: OV_H,  display: 'flex', alignItems: 'center' }}><Arrow /></div>
-              <div style={{ height: RT_H,  display: 'flex', alignItems: 'center' }}><Arrow /></div>
-              <div style={{ height: AN_H,  display: 'flex', alignItems: 'center' }}><Arrow /></div>
+              <div style={{ height: OV_H, display: 'flex', alignItems: 'center' }}><Arrow /></div>
+              <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}><Arrow /></div>
+              {/* MS zone: dashed arrow + vertical line up to the RT Risk Outcome broker */}
+              <div style={{ height: MS_H, display: 'flex', alignItems: 'center' }}>
+                <svg width={28} height={MS_H} style={{ flex: '0 0 28px', overflow: 'visible' }}>
+                  {/* Horizontal dashed arrow from MS zone */}
+                  <line x1={0} y1={MS_H / 2} x2={22} y2={MS_H / 2} stroke="#adb5bd" strokeWidth={2} strokeDasharray="4,3" />
+                  {/* Vertical dashed line going up to meet the RT broker row above */}
+                  <line x1={22} y1={MS_H / 2} x2={22} y2={-(LGAP + RT_H / 2)} stroke="#adb5bd" strokeWidth={2} strokeDasharray="4,3" />
+                  <polygon points={`18,${-(LGAP + RT_H / 2) + 4} 26,${-(LGAP + RT_H / 2) + 4} 22,${-(LGAP + RT_H / 2)}`} fill="#adb5bd" />
+                </svg>
+              </div>
             </div>
 
-            {/* Three output brokers — same width, same default blue */}
+            {/* Output brokers — OV validation + RT Risk Outcome at RT height */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
               <div style={{ height: OV_H, display: 'flex', alignItems: 'center' }}>
                 <BrokerNode label="Sales Order Validation" topicKey="ORDER_VALIDATION"
                   count={ev.order_validation} sm width={OUT_BROKER_W}
-                  tooltip="ORDER_VALIDATION — field-completeness outcome per order. Consumed by the Release Factory." />
+                  tooltip="ORDER_VALIDATION — field-completeness outcome per order. Consumed by the Automated Assessment Factory." />
               </div>
               <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
-                <BrokerNode label="RT Score" topicKey="RT_SCORE"
-                  count={ev.rt_score} sm width={OUT_BROKER_W}
-                  tooltip="RT_SCORE — consolidated GREEN / AMBER / RED risk score per transaction. Consumed by the Release Factory.">
-                  <ScoreBadges green={rf.rt_score_green} amber={rf.rt_score_amber} red={rf.rt_score_red} />
+                <BrokerNode label="RT Risk Outcome" topicKey="RT_RISK_OUTCOME"
+                  count={(ev.rt_risk_1_outcome || 0) + (ev.rt_risk_2_outcome || 0) + (ev.rt_risk_3_outcome || 0) + (ev.rt_risk_4_outcome || 0)} sm width={OUT_BROKER_W}
+                  tooltip="RT_RISK_OUTCOME — unified topic. All risk engines (EU + Member State) publish here with an engine identifier. The Automated Assessment Factory subscribes and computes a consolidated risk score.">
+                  <FlaggedBadge flagged={(rf.rt_risk_1_flagged || 0) + (rf.rt_risk_2_flagged || 0) + (rf.rt_risk_3_flagged || 0) + (rf.rt_risk_4_flagged || 0)}
+                    total={(ev.rt_risk_1_outcome || 0) + (ev.rt_risk_2_outcome || 0) + (ev.rt_risk_3_outcome || 0) + (ev.rt_risk_4_outcome || 0)} />
                 </BrokerNode>
               </div>
-              <div style={{ height: AN_H, display: 'flex', alignItems: 'center' }}>
-                <BrokerNode label="Goods Arrival Notification" topicKey="ARRIVAL_NOTIFICATION"
-                  count={ev.arrival_notification} sm width={OUT_BROKER_W}
-                  tooltip="ARRIVAL_NOTIFICATION — emitted once goods arrive at destination. Required by the Release Factory." />
-              </div>
+              {/* Empty space at MS_H to preserve the column height */}
+              <div style={{ height: MS_H }} />
             </div>
 
-            {/* Fan-in: 3 output brokers → Release Factory */}
-            <FanInSVG height={ROW1_H} inputYs={[yOV, yRT, yAN]} outputY={ROW1_H / 2} width={60} />
+            {/* Fan-in: 2 output brokers → center line at yRT */}
+            <FanInSVG height={ROW1_H} inputYs={[yOV, yRT]} outputY={yRT} width={60} />
 
-            {/* Release Factory — vertically centered at ROW1_H/2 to line up with the fan-in output */}
-            <div style={{ height: ROW1_H, display: 'flex', alignItems: 'center' }}>
-              <FactoryNode icon="🎯" label="Release Factory" description="routes by score + validation" sm
-                tooltip="Release Factory — waits for RT Score + Sales Order Validation + Goods Arrival Notification on each transaction, then routes: GREEN→Release, RED→Retain, AMBER→Investigate." />
-            </div>
+            {/* Center-line elements: Assessment Factory → Arrow → Assessment Outcome
+                All anchored at yRT so they align with the RT Risk Outcome broker */}
+            {(() => {
+              const cPad = Math.max(0, yRT - 45)
+              return (
+                <>
+                  <div style={{ height: ROW1_H, paddingTop: cPad, boxSizing: 'border-box' }}>
+                    <FactoryNode icon="🎯" label="Automated Assessment Factory" description="consolidates risk outcomes" sm
+                      tooltip="Automated Assessment Factory — collects risk outcomes from all engines, computes a consolidated score (flagged/total, with confidence), then routes: score < 33% → Release, 33–66% → Investigate, > 66% → Retain." />
+                  </div>
+                  <div style={{ height: ROW1_H, paddingTop: cPad + 30, boxSizing: 'border-box' }}>
+                    <Arrow />
+                  </div>
+                  <div style={{ height: ROW1_H, paddingTop: cPad, boxSizing: 'border-box' }}>
+                    <BrokerNode label="Assessment Outcome" topicKey="ASSESSMENT_OUTCOME"
+                      count={(ev.release_event || 0) + (ev.retain_event || 0) + (ev.investigate_event || 0)}
+                      sm width={OUT_BROKER_W}
+                      tooltip="ASSESSMENT_OUTCOME — unified topic carrying all routing decisions (release / retain / investigate) with the consolidated risk score and confidence.">
+                      <ScoreBadges green={ev.release_event} amber={ev.investigate_event} red={ev.retain_event} />
+                    </BrokerNode>
+                  </div>
+                </>
+              )
+            })()}
 
-            {/* Fan-out: Release Factory → 3 event brokers.
-                Target Ys match row-1 output brokers (yOV, yRT, yAN) so vertical spacing is consistent. */}
-            <FanOutSVG height={ROW1_H} targetYs={[yOV, yRT, yAN]} width={48} />
+            {/* ── Right side: balanced two-row layout ────────────── */}
+            {(() => {
+              // Right-side row heights — decoupled from left-side zone heights.
+              // Positioned with paddingTop so they align exactly with the fan-out
+              // target Ys (no flexbox centering mismatch).
+              const midY    = yRT
+              const rRowH   = 120
+              const rGap    = 20
+              const rTotalH = rRowH * 2 + rGap
+              const rTopPad = midY - rTotalH / 2            // padding from container top to first row
+              const rTopY   = rTopPad + rRowH / 2           // center of top row
+              const rBotY   = rTopPad + rRowH + rGap + rRowH / 2  // center of bottom row
 
-            {/* Three event brokers — heights match row-1 zones so centers land at yOV / yRT / yAN */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
-              <div style={{ height: OV_H, display: 'flex', alignItems: 'center' }}>
-                <BrokerNode label="Sales Order Release" topicKey="AUTOMATED_RELEASE"
-                  count={ev.release_event} accent="#1f7a3c" sm width={OUT_BROKER_W}
-                  tooltip="Sales Order Release — GREEN-path transactions cleared for storage without further investigation." />
-              </div>
-              <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
-                <BrokerNode label="Sales Order Retained" topicKey="AUTOMATED_RETAIN"
-                  count={ev.retain_event} accent="#c0392b" sm width={OUT_BROKER_W}
-                  tooltip="Sales Order Retained — RED-path transactions stored with the suspicious flag set." />
-              </div>
-              <div style={{ height: AN_H, display: 'flex', alignItems: 'center' }}>
-                <BrokerNode label="Sales Order for Investigation" topicKey="INVESTIGATION_NOTIFICATION"
-                  count={ev.investigate_event} accent="#e6820a" sm width={OUT_BROKER_W}
-                  tooltip="Sales Order for Investigation — AMBER-path transactions handed off to the investigation sub-pipeline." />
-              </div>
-            </div>
+              const colStyle = { height: ROW1_H, paddingTop: rTopPad, boxSizing: 'border-box' }
+              return (
+                <>
+                  <FanOutSVG height={ROW1_H} targetYs={[rTopY, rBotY]} width={48} />
 
-            {/* Middle section: DB Store Factory + Hub (grouped in a dashed zone) + After-Inv
-                brokers (mirroring event brokers) + the two-entity bottom band: Customs Office
-                row above, Tax Office row + VAT Fraud Detection Agent below. Absolute-positioned
-                canvas sized so the band extends below ROW1_H to fit both rows. */}
-            <MiddleSection ev={ev} rf={rf} customs={customs} tax={tax} taxRunning={taxRunning}
-              stored={stored} newStored={newStored}
-              H={ROW1_H} yRel={yOV} yRet={yRT} yInv={yAN} />
+                  <div style={colStyle}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: rGap }}>
+                      <div style={{ height: rRowH, display: 'flex', alignItems: 'center', gap: 0 }}>
+                        <div ref={ctRef}><FactoryNode icon="🏛️" label="C&T Risk Management" description="acts on investigate"
+                          width={200}
+                          tooltip="Custom & Tax Risk Management System — subscribes to Assessment Outcome (investigate route only). Opens cases in investigation.db and produces Investigation Outcome events on closure." /></div>
+                        <LongArrow width={60} />
+                        <div ref={invOutcomeRef}><BrokerNode label="Investigation Outcome" topicKey="INVESTIGATION_OUTCOME"
+                          count={ev.investigation_outcome || 0} sm width={OUT_BROKER_W}
+                          tooltip="INVESTIGATION_OUTCOME — produced by the C&T Risk Management system on case closure. Consumed by the Exit Process Factory." /></div>
+                      </div>
+                      <div style={{ height: rRowH, display: 'flex', alignItems: 'center', gap: 0 }}>
+                        <div ref={dbStoreRef}><FactoryNode icon="🚪" label="Exit Process Factory" description="emits CUSTOM_OUTCOME" sm
+                          tooltip="Exit Process Factory — subscribes to Assessment Outcome (release + retain routes) and Investigation Outcome. Emits a single terminal CUSTOM_OUTCOME event per completed order." /></div>
+                        {/* Stretchy arrow: flex-grows so Custom Outcome aligns with Investigation Outcome above */}
+                        <div style={{ flex: 1, display: 'flex', alignItems: 'center', minWidth: 60 }}>
+                          <div style={{ flex: 1, height: 2, background: '#adb5bd' }} />
+                          <div style={{ width: 0, height: 0, borderTop: '4px solid transparent', borderBottom: '4px solid transparent', borderLeft: '6px solid #adb5bd', flex: '0 0 auto' }} />
+                        </div>
+                        <div ref={dbHubRef}>
+                          <BrokerNode label="Custom Outcome" topicKey="CUSTOM_OUTCOME" sm width={OUT_BROKER_W}
+                            count={customTotal}
+                            tooltip={`Terminal CUSTOM_OUTCOME broker — ${customTotal} events.`}>
+                            <CustomOutcomeBreakdown s={customStatus} />
+                          </BrokerNode>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </>
+              )
+            })()}
+
+            {/* SVG overlay: subscription arrows that loop back to earlier components */}
+            {overlayPaths && (() => {
+              const grey = '#adb5bd'
+              const topRunwayY = 4                                        // just inside the top edge
+              const bottomRunwayY = overlayPaths.containerH + 25          // below all content including MS zone
+              // Single exit point: right edge of Entry, vertically centred
+              const startX = overlayPaths.ex
+              const startY = overlayPaths.ey
+              return (
+                <svg style={{ position: 'absolute', left: 0, top: 0, width: '100%', height: '100%',
+                              pointerEvents: 'none', overflow: 'visible' }}>
+
+                  {/* 1. Sales Order Event → C&T Risk Management (up from entry, right, down into C&T) */}
+                  <polyline
+                    points={`${startX},${startY} ${startX},${topRunwayY} ${overlayPaths.ctx},${topRunwayY} ${overlayPaths.ctx},${overlayPaths.cty}`}
+                    stroke={grey} strokeWidth="1.5" fill="none" />
+                  <polygon points={`${overlayPaths.ctx - 4},${overlayPaths.cty - 2} ${overlayPaths.ctx + 4},${overlayPaths.cty - 2} ${overlayPaths.ctx},${overlayPaths.cty + 4}`}
+                           fill={grey} />
+                  <text x={(startX + overlayPaths.ctx) / 2} y={topRunwayY + 10}
+                        textAnchor="middle" fontSize="8" fill={grey} fontWeight="600">
+                    Sales Order Event → C&amp;T Risk Management
+                  </text>
+
+                  {/* 2. Investigation Outcome → Exit Process Factory
+                       Zigzag: down from Inv Outcome, left between C&T and Custom Outcome, down into Exit Process */}
+                  {overlayPaths.ix > 0 && overlayPaths.dbx > 0 && (
+                    (() => {
+                      const midY = (overlayPaths.ctBottom + overlayPaths.dbTop) / 2  // gap between the two rows
+                      const zigX = overlayPaths.iLeft                                 // X = center of Inv Outcome
+                      return (
+                        <>
+                          <polyline
+                            points={`${zigX},${overlayPaths.iBottom} ${zigX},${midY} ${overlayPaths.dbx},${midY} ${overlayPaths.dbx},${overlayPaths.dbTop}`}
+                            stroke={grey} strokeWidth="1.5" fill="none" />
+                          <polygon points={`${overlayPaths.dbx - 4},${overlayPaths.dbTop} ${overlayPaths.dbx + 4},${overlayPaths.dbTop} ${overlayPaths.dbx},${overlayPaths.dbTop + 6}`}
+                                   fill={grey} />
+                          <text x={(zigX + overlayPaths.dbx) / 2} y={midY - 4}
+                                textAnchor="middle" fontSize="7" fill={grey} fontWeight="600">
+                            Inv Outcome → Exit Process
+                          </text>
+                        </>
+                      )
+                    })()
+                  )}
+
+                  {/* 3. Sales Order Event → DB Store Factory (down from entry, right below all boxes, up into DB Store) */}
+                  {overlayPaths.dbx > 0 && (
+                    <>
+                      <polyline
+                        points={`${startX},${startY} ${startX},${bottomRunwayY} ${overlayPaths.dbx},${bottomRunwayY} ${overlayPaths.dbx},${overlayPaths.dby}`}
+                        stroke={grey} strokeWidth="1.5" fill="none" />
+                      <polygon points={`${overlayPaths.dbx - 4},${overlayPaths.dby + 6} ${overlayPaths.dbx + 4},${overlayPaths.dby + 6} ${overlayPaths.dbx},${overlayPaths.dby}`}
+                               fill={grey} />
+                      <text x={(startX + overlayPaths.dbx) / 2} y={bottomRunwayY - 4}
+                            textAnchor="middle" fontSize="8" fill={grey} fontWeight="600">
+                        Sales Order Event → Exit Process Factory
+                      </text>
+                    </>
+                  )}
+                </svg>
+              )
+            })()}
 
           </div>
 
@@ -1307,24 +1463,20 @@ function PipelineDiagram({ pipeline }) {
         <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)' }}>Legend:</span>
 
         {/* Element types */}
-        <LegendItem color="var(--eu-blue)" bg="var(--eu-blue-light)" label="Broker" />
+        <LegendItem color="var(--eu-blue)" bg="var(--eu-blue-light)" label="Event Broker" />
         <LegendItem color="#868e96" bg="#f8f9fa" label="Factory" />
-        <LegendItem color="#868e96" bg="#eceff1" label="Queue (FIFO)" dashed />
-        <LegendItem color="#0284c7" bg="#e0f2fe" label="Custom Data Hub (MongoDB)" />
+        <LegendItem color="#8fb8de" bg="#f6f9fc" label="Member State Risk Monitors" />
+        <LegendItem color="var(--eu-blue)" bg="var(--eu-blue-light)" label="Custom Outcome (terminal broker)" />
         <LegendItem color="var(--text-muted)" bg="#ffffff" label="Processing zone" dashed />
 
-        {/* Sub-box accent colors carried by the broker inner sub-boxes */}
-        <LegendItem color="#1f7a3c" bg="#e8f5e9" label="Release (automated + post inv.)" />
-        <LegendItem color="#c0392b" bg="#fde8e8" label="Retain (automated + post inv.)" />
-        <LegendItem color="#e6820a" bg="#fff3e0" label="Investigation notification" />
-        <LegendItem color="#6366f1" bg="#eef2ff" label="Revenue Guardian UI (operator)" />
-        {/* Connector / arrow coding — all line strokes are neutral grey;
-            only the dashed style remains as a semantic differentiator. */}
-        <LegendItem color="#adb5bd" bg="#f8f9fa" label="Goods Transport / Arrival (dashed)" dashed />
+        {/* Score badges */}
+        <LegendItem color="#1f7a3c" bg="#e8f5e9" label="Release (green)" />
+        <LegendItem color="#e6820a" bg="#fff3e0" label="Investigate (amber)" />
+        <LegendItem color="#c0392b" bg="#fde8e8" label="Retain (red)" />
 
         <div style={{ marginLeft: 8, fontSize: 11, color: 'var(--text-muted)' }}>
-          Brokers all share the blue outer border — the inner sub-box carries the differentiating color.
-          Counts reflect JSON events persisted to <code>data/events/</code> since last reset.
+          Dashed labels indicate additional subscriptions (back-references to earlier brokers).
+          Counts reflect events persisted since last reset.
         </div>
       </div>
     </div>
@@ -1350,11 +1502,11 @@ const TOPIC_META = [
   { key: 'order_validation',                    label: 'Sales Order Validation',           factory: 'Sales Order Validation Factory',     color: '#1f7a3c' },
   { key: 'rt_risk_1_outcome',                   label: 'RT Risk 1 Outcome',                factory: 'Real-Time Risk Assessment 1',        color: '#6f42c1' },
   { key: 'rt_risk_2_outcome',                   label: 'RT Risk 2 Outcome',                factory: 'Real-Time Risk Assessment 2',        color: '#6f42c1' },
-  { key: 'rt_score',                            label: 'RT Score',                         factory: 'Risk Score Consolidation Factory',    color: '#e6820a' },
-  { key: 'arrival_notification',                label: 'Goods Arrival Notification',       factory: 'Goods Transport Factory',             color: '#e67e22' },
-  { key: 'release_event',                       label: 'Sales Order Release',              factory: 'Release Factory (GREEN)',             color: '#1f7a3c' },
-  { key: 'retain_event',                        label: 'Sales Order Retained',             factory: 'Retain Factory (RED)',                color: '#c0392b' },
-  { key: 'investigate_event',                   label: 'Sales Order for Investigation',    factory: 'Investigate Dispatch Factory (AMBER)', color: '#e6820a' },
+  { key: 'rt_score',                            label: 'RT Risk Outcome',                  factory: 'Automated Assessment Factory (consolidation)',      color: '#e6820a' },
+  // arrival_notification removed (Goods Transport flow eliminated)
+  { key: 'release_event',                       label: 'Release Outcome (green)',          factory: 'Automated Assessment Factory',                     color: '#1f7a3c' },
+  { key: 'retain_event',                        label: 'Release Outcome (red)',            factory: 'Automated Assessment Factory',                     color: '#c0392b' },
+  { key: 'investigate_event',                   label: 'Release Outcome (amber)',          factory: 'Automated Assessment Factory',                     color: '#e6820a' },
   { key: 'agent_retain_event',                  label: 'Retain Post Inv.',                 factory: 'Investigation Agent Worker',          color: '#c0392b' },
   { key: 'agent_release_event',                 label: 'Investigation Clearance',          factory: 'Investigation Agent Worker',          color: '#1f7a3c' },
   { key: 'release_after_investigation_event',   label: 'Release Post Inv.',                factory: 'Release After Investigation Factory', color: '#2e7d32' },
@@ -1486,7 +1638,7 @@ export default function SimulationPage() {
 
   return (
     <div className="page-container">
-      {/* Title row — flex so the Revenue Guardian launcher can sit on the
+      {/* Title row — flex so the C&T Risk Management launcher can sit on the
           far right while the title + subtitle stay left-aligned. */}
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16 }}>
         <div>
@@ -1495,23 +1647,7 @@ export default function SimulationPage() {
             Control the simulation and monitor the pub/sub pipeline in real time
           </div>
         </div>
-        <a
-          href="http://localhost:8080"
-          target="_blank"
-          rel="noopener noreferrer"
-          title="Open the Revenue Guardian operator console (port 8080) in a new tab"
-          style={{
-            display: 'inline-flex', alignItems: 'center', gap: 6,
-            background: '#6366f1', color: '#fff',
-            border: 'none', borderRadius: 'var(--radius)',
-            padding: '8px 14px', fontSize: 12, fontWeight: 700,
-            textDecoration: 'none', whiteSpace: 'nowrap',
-            boxShadow: '0 1px 4px rgba(99, 102, 241, 0.25)',
-            cursor: 'pointer', flex: '0 0 auto',
-          }}>
-          🧑‍💼 Open Revenue Guardian
-          <span style={{ fontSize: 11, opacity: 0.85 }}>↗</span>
-        </a>
+        {/* C&T Risk Management link removed */}
         <button
           onClick={() => setPresentationMode(p => !p)}
           title="Reduce UI refresh rate to 2 fps for smooth screen-sharing"

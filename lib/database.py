@@ -7,10 +7,11 @@ which March-2026 transactions have been replayed.
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from lib.config import EUROPEAN_CUSTOM_DB, SIMULATION_DB
+from lib.config import EUROPEAN_CUSTOM_DB, SIMULATION_DB, INVESTIGATION_DB, SEED_CASES_DB
 
 # ── Schema ────────────────────────────────────────────────────────────────────
 
@@ -73,19 +74,19 @@ CREATE INDEX IF NOT EXISTS idx_alarm_expires ON alarms(expires_at);
 _AGENT_LOG_DDL = """
 CREATE TABLE IF NOT EXISTS agent_log (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    transaction_id    TEXT    NOT NULL,
-    seller_name       TEXT    NOT NULL,
-    buyer_country     TEXT    NOT NULL,
-    item_description  TEXT    NOT NULL,
-    item_category     TEXT    NOT NULL,
-    value             REAL    NOT NULL,
-    vat_rate          REAL    NOT NULL,
-    correct_vat_rate  REAL    NOT NULL,
-    verdict           TEXT    NOT NULL,
-    reasoning         TEXT    NOT NULL,
+    transaction_id    TEXT,
+    seller_name       TEXT,
+    buyer_country     TEXT,
+    item_description  TEXT,
+    item_category     TEXT,
+    value             REAL,
+    vat_rate          REAL,
+    correct_vat_rate  REAL,
+    verdict           TEXT,
+    reasoning         TEXT,
     legislation_refs  TEXT,
-    sent_to_ireland   INTEGER NOT NULL DEFAULT 0,
-    processed_at      TEXT    NOT NULL
+    sent_to_ireland   INTEGER DEFAULT 0,
+    processed_at      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_agent_log_tx ON agent_log(transaction_id);
 """
@@ -115,71 +116,266 @@ CREATE INDEX IF NOT EXISTS idx_ireland_queue_tx ON ireland_queue(transaction_id)
 """
 
 
+# ── Reference tables (lookups previously hardcoded in the frontend) ──────────
+#
+# Hosted in european_custom.db. Read by GET /api/reference; seeded on first
+# init from the constants below (idempotent — INSERT OR IGNORE).
+
+_VAT_CATEGORIES_DDL = """
+CREATE TABLE IF NOT EXISTS vat_categories (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    label       TEXT    UNIQUE NOT NULL,
+    rate        REAL    NOT NULL,
+    description TEXT,
+    sort_order  INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+_RISK_LEVELS_DDL = """
+CREATE TABLE IF NOT EXISTS risk_levels (
+    name          TEXT    PRIMARY KEY,
+    display_color TEXT,
+    sort_order    INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+_EU_REGIONS_DDL = """
+CREATE TABLE IF NOT EXISTS eu_regions (
+    country_code TEXT    PRIMARY KEY,
+    country_name TEXT,
+    region       TEXT    NOT NULL
+);
+"""
+
+_SUSPICION_TYPES_DDL = """
+CREATE TABLE IF NOT EXISTS suspicion_types (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT    UNIQUE NOT NULL,
+    description TEXT,
+    icon        TEXT,
+    color       TEXT,
+    sort_order  INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+_SALES_ORDER_STATUSES_DDL = """
+CREATE TABLE IF NOT EXISTS sales_order_statuses (
+    name        TEXT    PRIMARY KEY,
+    description TEXT,
+    sort_order  INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+_SEED_SALES_ORDER_STATUSES = [
+    ("Under Investigation", "Set at record creation when the C&T factory opens a case", 10),
+    ("To Be Released",      "Set by the Customs officer when recommending release",     20),
+    ("To Be Retained",      "Set by the Customs officer when recommending retainment",  30),
+]
+
+
+_CASE_STATUSES_DDL = """
+CREATE TABLE IF NOT EXISTS case_statuses (
+    name        TEXT    PRIMARY KEY,
+    description TEXT,
+    sort_order  INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+_SEED_CASE_STATUSES = [
+    ("New",                            "Set at case creation by the C&T factory",                       10),
+    ("Under Review by Customs",        "Customs officer has opened / is reviewing the case",            20),
+    ("AI Investigation in Progress",   "VAT Fraud Detection agent is analysing (Tax review requested)", 30),
+    ("Under Review by Tax",            "Tax officer is reviewing after AI analysis completes",          40),
+    ("Requested Input by Third Party", "Awaiting response from an external third party",                50),
+    ("Closed",                         "Terminal — officer recommended release or retainment",          60),
+]
+
+
+_SEED_VAT_CATEGORIES = [
+    ("Educational Material", 9.0,  "Books, learning aids", 10),
+    ("Consumer Electronics", 23.0, "Phones, audio, smart devices", 20),
+    ("Fashion & Apparel",    23.0, "Clothing, footwear, accessories", 30),
+    ("Health & Beauty",      13.5, "Cosmetics, personal care", 40),
+    ("Home & Garden",        23.0, "Appliances, furniture, decor", 50),
+    ("Accessories",          23.0, "Phone/computer accessories", 60),
+    ("Toys & Games",         13.5, "Toys, board games", 70),
+]
+
+_SEED_RISK_LEVELS = [
+    ("Critical", "destructive", 10),
+    ("High",     "risk-high",   20),
+    ("Medium",   "warning",     30),
+    ("Low",      "success",     40),
+]
+
+_SEED_REGIONS = [
+    # Ireland
+    ("IE", "Ireland",         "Ireland"),
+    ("GB", "United Kingdom",  "Ireland"),
+    # Western EU
+    ("FR", "France",          "Western EU"),
+    ("BE", "Belgium",         "Western EU"),
+    ("NL", "Netherlands",     "Western EU"),
+    ("LU", "Luxembourg",      "Western EU"),
+    ("DE", "Germany",         "Western EU"),
+    # Southern EU
+    ("ES", "Spain",           "Southern EU"),
+    ("PT", "Portugal",        "Southern EU"),
+    ("IT", "Italy",           "Southern EU"),
+    # Central / Eastern EU
+    ("PL", "Poland",          "Central EU"),
+    ("CZ", "Czech Republic",  "Central EU"),
+    ("HU", "Hungary",         "Central EU"),
+    ("SK", "Slovakia",        "Central EU"),
+    # Nordics
+    ("DK", "Denmark",         "Nordics"),
+    ("SE", "Sweden",          "Nordics"),
+    ("FI", "Finland",         "Nordics"),
+]
+
+_ML_RISK_RULES_DDL = """
+CREATE TABLE IF NOT EXISTS ml_risk_rules (
+    id                           INTEGER PRIMARY KEY AUTOINCREMENT,
+    seller                       TEXT NOT NULL,
+    country_origin               TEXT NOT NULL,
+    vat_product_category         TEXT NOT NULL,
+    country_destination          TEXT NOT NULL,
+    risk                         REAL NOT NULL,
+    description                  TEXT,
+    seller_weight                REAL,
+    country_origin_weight        REAL,
+    vat_product_category_weight  REAL,
+    country_destination_weight   REAL,
+    UNIQUE(seller, country_origin, vat_product_category, country_destination)
+);
+CREATE INDEX IF NOT EXISTS idx_mlrr_lookup
+    ON ml_risk_rules(seller, country_origin, vat_product_category, country_destination);
+"""
+
+
+_SEED_SUSPICION_TYPES = [
+    ("VAT Rate Deviation",
+     "Goods reported at differing VAT rates across shipments — pointing to rate misclassification or selective underreporting.",
+     "AlertTriangle", "risk-critical", 10),
+    ("Customs Duty Gap",
+     "Customs duties declared differ from the expected tariff for the declared commodity code.",
+     "FileWarning",   "risk-high",     20),
+    ("Product Type Mismatch",
+     "Commodity description conflicts with the product category used in the IOSS VAT filing.",
+     "Package",       "risk-medium",   30),
+    ("Taxable Value Understatement",
+     "Declared item value appears lower than market value for the product category.",
+     "DollarSign",    "risk-high",     40),
+    ("Watchlist Match",
+     "Seller, supplier, or origin matches an active enforcement watchlist.",
+     "ShieldAlert",   "risk-critical", 50),
+]
+
+
 # ── Data hub schema (3 dark-purple tables from the data model diagram) ───────
 #
-# These three tables form the new normalised data hub. They live alongside the
-# legacy `transactions` table (which the alarm checker still reads for the
-# 7-day VAT-ratio baseline) and are populated by the _data_hub_writer polling
-# worker on a 30-s tick. PK / FK is sales_order_line_item_SKU = the per-line
-# unique identifier f"{so_id}-{n:03d}".
+# ── New data model (Entity Data Model Simplified) ─────────────────────────────
+# Three tables with 1:1 relationships keyed on Sales_Order_Business_Key.
+# Sales_Order and Sales_Order_Risk live in european_custom.db (data hub).
+# Sales_Order_Case lives in a separate investigation.db.
+# Field names match the JSON event payloads and the data model diagram.
 
-_SO_LI_DDL = """
-CREATE TABLE IF NOT EXISTS sales_order_line_item (
-    sales_order_line_item_SKU TEXT PRIMARY KEY,
-    so_id                     TEXT NOT NULL,
-    line_item_name            TEXT NOT NULL,
-    line_item_SKU             TEXT NOT NULL,
-    line_item_description     TEXT,
-    line_item_price           REAL,
-    product_category          TEXT,
-    deemed_importer_id        TEXT,
-    deemed_importer_name      TEXT,
-    deemed_importer_country   TEXT,
-    seller_id                 TEXT,
-    seller_name               TEXT,
-    seller_city               TEXT,
-    origin_country            TEXT,
-    destination_country       TEXT,
-    dest_country_region       TEXT,
-    VAT_pct                   REAL,
-    VAT_paid                  REAL,
-    date                      TEXT
+_SALES_ORDER_DDL = """
+CREATE TABLE IF NOT EXISTS Sales_Order (
+    Sales_Order_ID              TEXT NOT NULL,
+    Sales_Order_Business_Key    TEXT PRIMARY KEY,
+    HS_Product_Category         TEXT,
+    Product_Description         TEXT,
+    Product_Value               REAL,
+    VAT_Rate                    REAL,
+    VAT_Fee                     REAL,
+    Seller_Name                 TEXT,
+    Country_Origin              TEXT,
+    Country_Destination         TEXT,
+    Status                      TEXT,
+    Update_time                 TEXT,
+    Updated_by                  TEXT,
+    Case_ID                     TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_so_li_so_id     ON sales_order_line_item(so_id);
-CREATE INDEX IF NOT EXISTS idx_so_li_date      ON sales_order_line_item(date);
-CREATE INDEX IF NOT EXISTS idx_so_li_region    ON sales_order_line_item(dest_country_region);
-CREATE INDEX IF NOT EXISTS idx_so_li_importer  ON sales_order_line_item(deemed_importer_id);
+CREATE INDEX IF NOT EXISTS idx_so_id      ON Sales_Order(Sales_Order_ID);
+CREATE INDEX IF NOT EXISTS idx_so_status  ON Sales_Order(Status);
+CREATE INDEX IF NOT EXISTS idx_so_origin  ON Sales_Order(Country_Origin);
+CREATE INDEX IF NOT EXISTS idx_so_dest    ON Sales_Order(Country_Destination);
+CREATE INDEX IF NOT EXISTS idx_so_case_id ON Sales_Order(Case_ID);
 """
 
-_LI_RISK_DDL = """
-CREATE TABLE IF NOT EXISTS line_item_risk (
-    sales_order_line_item_SKU TEXT PRIMARY KEY,
-    risk_score_numeric        INTEGER,
-    risk_level                TEXT,
-    risk_description          TEXT,
-    suggested_risk_action     TEXT,
-    FOREIGN KEY (sales_order_line_item_SKU)
-        REFERENCES sales_order_line_item(sales_order_line_item_SKU)
+_SALES_ORDER_RISK_DDL = """
+CREATE TABLE IF NOT EXISTS Sales_Order_Risk (
+    Sales_Order_Risk_ID         TEXT PRIMARY KEY,
+    Sales_Order_Business_Key    TEXT NOT NULL,
+    Risk_Type                   TEXT,
+    Overall_Risk_Score          REAL,
+    Overall_Risk_Level          TEXT,
+    Seller_Risk_Score           REAL,
+    Country_Risk_Score          REAL,
+    Product_Category_Risk_Score REAL,
+    Manufacturer_Risk_Score     REAL,
+    Confidence_Score            REAL,
+    Overall_Risk_Description    TEXT,
+    Proposed_Risk_Action        TEXT,
+    Risk_Comment                TEXT,
+    Evaluation_by               TEXT,
+    Update_time                 TEXT,
+    Updated_by                  TEXT,
+    FOREIGN KEY (Sales_Order_Business_Key)
+        REFERENCES Sales_Order(Sales_Order_Business_Key)
 );
-CREATE INDEX IF NOT EXISTS idx_li_risk_level ON line_item_risk(risk_level);
+CREATE INDEX IF NOT EXISTS idx_sor_bk    ON Sales_Order_Risk(Sales_Order_Business_Key);
+CREATE INDEX IF NOT EXISTS idx_sor_level ON Sales_Order_Risk(Overall_Risk_Level);
 """
 
-_LI_AI_DDL = """
-CREATE TABLE IF NOT EXISTS line_item_ai_analysis (
-    sales_order_line_item_SKU TEXT PRIMARY KEY,
-    analysis_outcome          TEXT,
-    analysis_description      TEXT,
-    confidence_score          REAL,
-    source                    TEXT,
-    correct_product_category  TEXT,
-    correct_vat_pct           REAL,
-    correct_vat_value         REAL,
-    vat_exposure              REAL,
-    FOREIGN KEY (sales_order_line_item_SKU)
-        REFERENCES sales_order_line_item(sales_order_line_item_SKU)
+_SALES_ORDER_CASE_DDL = """
+CREATE TABLE IF NOT EXISTS Sales_Order_Case (
+    Case_ID                          TEXT PRIMARY KEY,
+    Sales_Order_Business_Key         TEXT NOT NULL,
+    Status                           TEXT,
+    VAT_Problem_Type                 TEXT,
+    Recommended_Product_Value        REAL,
+    Recommended_VAT_Product_Category TEXT,
+    Recommended_VAT_Rate             REAL,
+    Recommended_VAT_Fee              REAL,
+    AI_Analysis                      TEXT,
+    AI_Confidence                    REAL,
+    VAT_Gap_Fee                      REAL,
+    Evaluation_by                    TEXT,
+    Proposed_Action_Tax              TEXT,
+    Proposed_Action_Customs          TEXT,
+    Communication                    TEXT,
+    Additional_Evidence              TEXT,
+    Update_time                      TEXT,
+    Updated_by                       TEXT,
+    Created_time                     TEXT,
+    -- Case-level overall risk score (0-1, averaged across all orders)
+    Overall_Case_Risk_Score          REAL DEFAULT 0,
+    Overall_Case_Risk_Level          TEXT DEFAULT 'Low',
+    -- Per-engine risk scores (0-1 average across all orders in the case)
+    Engine_VAT_Ratio                 REAL DEFAULT 0,
+    Engine_ML_Watchlist              REAL DEFAULT 0,
+    Engine_IE_Seller_Watchlist       REAL DEFAULT 0,
+    Engine_Description_Vagueness     REAL DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS idx_li_ai_outcome ON line_item_ai_analysis(analysis_outcome);
+CREATE INDEX IF NOT EXISTS idx_soc_bk      ON Sales_Order_Case(Sales_Order_Business_Key);
+CREATE INDEX IF NOT EXISTS idx_soc_status  ON Sales_Order_Case(Status);
+CREATE INDEX IF NOT EXISTS idx_soc_created ON Sales_Order_Case(Created_time);
+
+CREATE TABLE IF NOT EXISTS risk_engine_signals (
+    field_name    TEXT PRIMARY KEY,
+    engine_key    TEXT NOT NULL,
+    display_name  TEXT NOT NULL,
+    description   TEXT
+);
+INSERT OR IGNORE INTO risk_engine_signals VALUES
+    ('Engine_VAT_Ratio',             'vat_ratio',              'VAT Ratio Deviation',        'Statistical deviation in VAT/value ratio vs 8-week baseline'),
+    ('Engine_ML_Watchlist',          'watchlist',              'VAT Misclassification Risk',  'ML-based watchlist matching on seller × origin × category × destination'),
+    ('Engine_IE_Seller_Watchlist',   'ireland_watchlist',      'Seller Risk',                 'Ireland-specific seller watchlist for IE-destined goods'),
+    ('Engine_Description_Vagueness', 'description_vagueness',  'Description Vagueness',       'NLP-based detection of vague or generic product descriptions');
 """
+
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -208,7 +404,6 @@ def _migrate_european_custom_db(conn: sqlite3.Connection) -> None:
             pass   # already exists
     for ddl in [
         _ALARM_DDL, _AGENT_LOG_DDL, _IRELAND_QUEUE_DDL,
-        _SO_LI_DDL, _LI_RISK_DDL, _LI_AI_DDL,
     ]:
         for stmt in ddl.strip().split(";"):
             s = stmt.strip()
@@ -257,19 +452,145 @@ def init_european_custom_db() -> None:
     conn.close()
     # Backfill the new data hub table from the legacy transactions table.
     # Idempotent (uses INSERT OR REPLACE keyed on the synthetic SKU), so it's
-    # safe to call on every startup. Skip if the legacy table is empty or the
-    # backfill is already complete.
-    try:
-        conn = _connect(EUROPEAN_CUSTOM_DB)
-        legacy_n = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
-        new_n    = conn.execute("SELECT COUNT(*) FROM sales_order_line_item").fetchone()[0]
-        conn.close()
-        if legacy_n > 0 and new_n < legacy_n:
-            n = backfill_sales_order_line_item_from_transactions()
-            print(f"[data_hub] backfilled {n} rows into sales_order_line_item "
-                  f"({legacy_n} legacy rows, {new_n} already present)")
-    except Exception as exc:
-        print(f"[data_hub] backfill skipped: {exc}")
+    # Create the new data model tables (Sales_Order + Sales_Order_Risk)
+    _init_ddl(EUROPEAN_CUSTOM_DB, _SALES_ORDER_DDL)
+    _init_ddl(EUROPEAN_CUSTOM_DB, _SALES_ORDER_RISK_DDL)
+    # Reference / lookup tables (replace static frontend constants)
+    _init_ddl(EUROPEAN_CUSTOM_DB, _VAT_CATEGORIES_DDL)
+    _init_ddl(EUROPEAN_CUSTOM_DB, _RISK_LEVELS_DDL)
+    _init_ddl(EUROPEAN_CUSTOM_DB, _EU_REGIONS_DDL)
+    _init_ddl(EUROPEAN_CUSTOM_DB, _SUSPICION_TYPES_DDL)
+    _init_ddl(EUROPEAN_CUSTOM_DB, _ML_RISK_RULES_DDL)
+    _init_ddl(EUROPEAN_CUSTOM_DB, _SALES_ORDER_STATUSES_DDL)
+    _init_ddl(EUROPEAN_CUSTOM_DB, _CASE_STATUSES_DDL)
+    _seed_reference_tables()
+    _seed_ml_risk_rules_from_xlsx()
+
+
+def init_investigation_db() -> None:
+    """Create the 3-table case dataset (Sales_Order + Sales_Order_Risk +
+    Sales_Order_Case) in investigation.db. These mirror the data model used
+    by the data hub and give the C&T Risk Management System a self-contained store."""
+    _init_ddl(INVESTIGATION_DB, _SALES_ORDER_DDL)
+    _init_ddl(INVESTIGATION_DB, _SALES_ORDER_RISK_DDL)
+    _init_ddl(INVESTIGATION_DB, _SALES_ORDER_CASE_DDL)
+    # Migrate older DBs: add columns introduced after initial schema
+    conn = _connect(INVESTIGATION_DB)
+    with conn:
+        for table, col, definition in [
+            ("Sales_Order_Case", "Created_time",              "TEXT"),
+            ("Sales_Order",      "Case_ID",                   "TEXT"),
+            ("Sales_Order_Case", "Overall_Case_Risk_Score",   "REAL DEFAULT 0"),
+            ("Sales_Order_Case", "Overall_Case_Risk_Level",   "TEXT DEFAULT 'Low'"),
+            ("Sales_Order_Case", "Engine_VAT_Ratio",          "REAL DEFAULT 0"),
+            ("Sales_Order_Case", "Engine_ML_Watchlist",       "REAL DEFAULT 0"),
+            ("Sales_Order_Case", "Engine_IE_Seller_Watchlist", "REAL DEFAULT 0"),
+            ("Sales_Order_Case", "Engine_Description_Vagueness", "REAL DEFAULT 0"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {definition}")
+            except sqlite3.OperationalError:
+                pass
+        conn.execute("UPDATE Sales_Order_Case SET Created_time = Update_time WHERE Created_time IS NULL")
+    conn.close()
+
+
+def _init_ddl(db_path, ddl: str) -> None:
+    """Two-pass DDL init: tables first, then indexes."""
+    conn = _connect(db_path)
+    with conn:
+        for stmt in ddl.strip().split(";"):
+            s = stmt.strip()
+            if not s or s.upper().startswith("CREATE INDEX"):
+                continue
+            try:
+                conn.execute(s)
+            except sqlite3.OperationalError:
+                pass
+        for stmt in ddl.strip().split(";"):
+            s = stmt.strip()
+            if s and s.upper().startswith("CREATE INDEX"):
+                try:
+                    conn.execute(s)
+                except sqlite3.OperationalError:
+                    pass
+    conn.close()
+
+
+def upsert_sales_order(row: dict) -> None:
+    """Insert or update a Sales_Order record."""
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    with conn:
+        conn.execute("""
+            INSERT OR REPLACE INTO Sales_Order (
+                Sales_Order_ID, Sales_Order_Business_Key,
+                HS_Product_Category, Product_Description, Product_Value,
+                VAT_Rate, VAT_Fee, Seller_Name,
+                Country_Origin, Country_Destination,
+                Status, Update_time, Updated_by
+            ) VALUES (
+                :Sales_Order_ID, :Sales_Order_Business_Key,
+                :HS_Product_Category, :Product_Description, :Product_Value,
+                :VAT_Rate, :VAT_Fee, :Seller_Name,
+                :Country_Origin, :Country_Destination,
+                :Status, :Update_time, :Updated_by
+            )
+        """, row)
+    conn.close()
+
+
+def upsert_sales_order_risk(row: dict) -> None:
+    """Insert or update a Sales_Order_Risk record."""
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    with conn:
+        conn.execute("""
+            INSERT OR REPLACE INTO Sales_Order_Risk (
+                Sales_Order_Risk_ID, Sales_Order_Business_Key,
+                Risk_Type, Overall_Risk_Score, Overall_Risk_Level,
+                Seller_Risk_Score, Country_Risk_Score,
+                Product_Category_Risk_Score, Manufacturer_Risk_Score,
+                Confidence_Score, Overall_Risk_Description,
+                Proposed_Risk_Action, Risk_Comment,
+                Evaluation_by, Update_time, Updated_by
+            ) VALUES (
+                :Sales_Order_Risk_ID, :Sales_Order_Business_Key,
+                :Risk_Type, :Overall_Risk_Score, :Overall_Risk_Level,
+                :Seller_Risk_Score, :Country_Risk_Score,
+                :Product_Category_Risk_Score, :Manufacturer_Risk_Score,
+                :Confidence_Score, :Overall_Risk_Description,
+                :Proposed_Risk_Action, :Risk_Comment,
+                :Evaluation_by, :Update_time, :Updated_by
+            )
+        """, row)
+    conn.close()
+
+
+def upsert_sales_order_case(row: dict) -> None:
+    """Insert or update a Sales_Order_Case record in the investigation DB."""
+    conn = _connect(INVESTIGATION_DB)
+    with conn:
+        conn.execute("""
+            INSERT OR REPLACE INTO Sales_Order_Case (
+                Case_ID, Sales_Order_Business_Key, Status,
+                VAT_Problem_Type, Recommended_Product_Value,
+                Recommended_VAT_Product_Category, Recommended_VAT_Rate,
+                Recommended_VAT_Fee, AI_Analysis, AI_Confidence,
+                VAT_Gap_Fee, Evaluation_by,
+                Proposed_Action_Tax, Proposed_Action_Customs,
+                Communication, Additional_Evidence,
+                Update_time, Updated_by
+            ) VALUES (
+                :Case_ID, :Sales_Order_Business_Key, :Status,
+                :VAT_Problem_Type, :Recommended_Product_Value,
+                :Recommended_VAT_Product_Category, :Recommended_VAT_Rate,
+                :Recommended_VAT_Fee, :AI_Analysis, :AI_Confidence,
+                :VAT_Gap_Fee, :Evaluation_by,
+                :Proposed_Action_Tax, :Proposed_Action_Customs,
+                :Communication, :Additional_Evidence,
+                :Update_time, :Updated_by
+            )
+        """, row)
+    conn.close()
 
 
 def init_simulation_db() -> None:
@@ -638,21 +959,25 @@ def historical_transaction_count() -> int:
 
 def insert_agent_log(entry: dict) -> None:
     conn = _connect(EUROPEAN_CUSTOM_DB)
-    with conn:
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO agent_log
-            (transaction_id, seller_name, buyer_country, item_description,
-             item_category, value, vat_rate, correct_vat_rate,
-             verdict, reasoning, legislation_refs, sent_to_ireland, processed_at)
-            VALUES
-            (:transaction_id, :seller_name, :buyer_country, :item_description,
-             :item_category, :value, :vat_rate, :correct_vat_rate,
-             :verdict, :reasoning, :legislation_refs, :sent_to_ireland, :processed_at)
-            """,
-            entry,
-        )
-    conn.close()
+    try:
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO agent_log
+                (transaction_id, seller_name, buyer_country, item_description,
+                 item_category, value, vat_rate, correct_vat_rate,
+                 verdict, reasoning, legislation_refs, sent_to_ireland, processed_at)
+                VALUES
+                (:transaction_id, :seller_name, :buyer_country, :item_description,
+                 :item_category, :value, :vat_rate, :correct_vat_rate,
+                 :verdict, :reasoning, :legislation_refs, :sent_to_ireland, :processed_at)
+                """,
+                entry,
+            )
+    except Exception as e:
+        print(f"  [agent_log] INSERT failed: {e}")
+    finally:
+        conn.close()
 
 
 def get_agent_log(limit: int = 100) -> list[dict]:
@@ -794,192 +1119,658 @@ def get_ireland_case(transaction_id: str) -> dict | None:
     return result
 
 
-# ── Data hub upserts (3 dark-purple tables) ──────────────────────────────────
+# ── Sales_Order_Case read / update (investigation.db) ────────────────────────
 
-def upsert_sales_order_line_item(row: dict) -> None:
-    """
-    Insert-or-replace a row in sales_order_line_item.
-
-    Idempotent — re-receiving the same line is a no-op (the keys never change
-    because they're derived deterministically from so_id + line_number).
-    """
-    conn = _connect(EUROPEAN_CUSTOM_DB)
-    with conn:
-        conn.execute(
-            """
-            INSERT INTO sales_order_line_item
-            (sales_order_line_item_SKU, so_id, line_item_name, line_item_SKU,
-             line_item_description, line_item_price, product_category,
-             deemed_importer_id, deemed_importer_name, deemed_importer_country,
-             seller_id, seller_name, seller_city, origin_country,
-             destination_country, dest_country_region,
-             VAT_pct, VAT_paid, date)
-            VALUES
-            (:sales_order_line_item_SKU, :so_id, :line_item_name, :line_item_SKU,
-             :line_item_description, :line_item_price, :product_category,
-             :deemed_importer_id, :deemed_importer_name, :deemed_importer_country,
-             :seller_id, :seller_name, :seller_city, :origin_country,
-             :destination_country, :dest_country_region,
-             :VAT_pct, :VAT_paid, :date)
-            ON CONFLICT(sales_order_line_item_SKU) DO UPDATE SET
-              line_item_description   = excluded.line_item_description,
-              line_item_price         = excluded.line_item_price,
-              product_category        = excluded.product_category,
-              deemed_importer_id      = excluded.deemed_importer_id,
-              deemed_importer_name    = excluded.deemed_importer_name,
-              deemed_importer_country = excluded.deemed_importer_country,
-              seller_id               = excluded.seller_id,
-              seller_name             = excluded.seller_name,
-              seller_city             = excluded.seller_city,
-              origin_country          = excluded.origin_country,
-              destination_country     = excluded.destination_country,
-              dest_country_region     = excluded.dest_country_region,
-              VAT_pct                 = excluded.VAT_pct,
-              VAT_paid                = excluded.VAT_paid,
-              date                    = excluded.date
-            """,
-            row,
-        )
+def get_all_cases(status: str | None = None, limit: int = 200) -> list[dict]:
+    """Return Sales_Order_Case rows, optionally filtered by Status."""
+    import json as _json
+    conn = _connect(INVESTIGATION_DB)
+    if status:
+        rows = conn.execute(
+            "SELECT * FROM Sales_Order_Case WHERE Status = ? "
+            "ORDER BY Update_time DESC LIMIT ?", (status, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM Sales_Order_Case ORDER BY Update_time DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
     conn.close()
+    result = []
+    for r in rows:
+        d = dict(r)
+        # Parse Communication JSON string into a list
+        try:
+            d["Communication"] = _json.loads(d["Communication"]) if d.get("Communication") else []
+        except Exception:
+            d["Communication"] = []
+        result.append(d)
+    return result
 
 
-def bulk_upsert_sales_order_line_item(rows: list[dict]) -> int:
-    """Bulk variant for the historical backfill — single transaction."""
-    if not rows:
-        return 0
+def get_case_by_id(case_id: str) -> dict | None:
+    """Single case from investigation.db."""
+    import json as _json
+    conn = _connect(INVESTIGATION_DB)
+    row = conn.execute(
+        "SELECT * FROM Sales_Order_Case WHERE Case_ID = ? LIMIT 1",
+        (case_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    d = dict(row)
+    try:
+        d["Communication"] = _json.loads(d["Communication"]) if d.get("Communication") else []
+    except Exception:
+        d["Communication"] = []
+    return d
+
+
+def update_case(case_id: str, updates: dict) -> bool:
+    """Partial update of a Sales_Order_Case row. Returns True if a row was updated."""
+    import json as _json
+    if not updates:
+        return False
+    # Serialize Communication back to JSON string if present
+    if "Communication" in updates and isinstance(updates["Communication"], list):
+        updates["Communication"] = _json.dumps(updates["Communication"])
+    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    values = list(updates.values()) + [case_id]
+    conn = _connect(INVESTIGATION_DB)
+    with conn:
+        cur = conn.execute(
+            f"UPDATE Sales_Order_Case SET {set_clause} WHERE Case_ID = ?",
+            values,
+        )
+    changed = cur.rowcount > 0
+    conn.close()
+    return changed
+
+
+# ── Reference table seed + getters ──────────────────────────────────────────
+
+def _seed_reference_tables() -> None:
+    """Idempotent seed of the four lookup tables. INSERT OR IGNORE keyed on
+    the natural unique column so re-runs don't duplicate rows."""
     conn = _connect(EUROPEAN_CUSTOM_DB)
     with conn:
         conn.executemany(
-            """
-            INSERT OR REPLACE INTO sales_order_line_item
-            (sales_order_line_item_SKU, so_id, line_item_name, line_item_SKU,
-             line_item_description, line_item_price, product_category,
-             deemed_importer_id, deemed_importer_name, deemed_importer_country,
-             seller_id, seller_name, seller_city, origin_country,
-             destination_country, dest_country_region,
-             VAT_pct, VAT_paid, date)
-            VALUES
-            (:sales_order_line_item_SKU, :so_id, :line_item_name, :line_item_SKU,
-             :line_item_description, :line_item_price, :product_category,
-             :deemed_importer_id, :deemed_importer_name, :deemed_importer_country,
-             :seller_id, :seller_name, :seller_city, :origin_country,
-             :destination_country, :dest_country_region,
-             :VAT_pct, :VAT_paid, :date)
-            """,
-            rows,
+            "INSERT OR IGNORE INTO vat_categories (label, rate, description, sort_order) VALUES (?, ?, ?, ?)",
+            _SEED_VAT_CATEGORIES,
         )
-    conn.close()
-    return len(rows)
-
-
-def upsert_line_item_risk(row: dict) -> None:
-    """Insert-or-replace a row in line_item_risk."""
-    conn = _connect(EUROPEAN_CUSTOM_DB)
-    with conn:
-        conn.execute(
-            """
-            INSERT INTO line_item_risk
-            (sales_order_line_item_SKU, risk_score_numeric, risk_level,
-             risk_description, suggested_risk_action)
-            VALUES
-            (:sales_order_line_item_SKU, :risk_score_numeric, :risk_level,
-             :risk_description, :suggested_risk_action)
-            ON CONFLICT(sales_order_line_item_SKU) DO UPDATE SET
-              risk_score_numeric    = excluded.risk_score_numeric,
-              risk_level            = excluded.risk_level,
-              risk_description      = excluded.risk_description,
-              suggested_risk_action = excluded.suggested_risk_action
-            """,
-            row,
+        conn.executemany(
+            "INSERT OR IGNORE INTO risk_levels (name, display_color, sort_order) VALUES (?, ?, ?)",
+            _SEED_RISK_LEVELS,
+        )
+        conn.executemany(
+            "INSERT OR IGNORE INTO eu_regions (country_code, country_name, region) VALUES (?, ?, ?)",
+            _SEED_REGIONS,
+        )
+        conn.executemany(
+            "INSERT OR IGNORE INTO suspicion_types (name, description, icon, color, sort_order) VALUES (?, ?, ?, ?, ?)",
+            _SEED_SUSPICION_TYPES,
+        )
+        conn.executemany(
+            "INSERT OR IGNORE INTO sales_order_statuses (name, description, sort_order) VALUES (?, ?, ?)",
+            _SEED_SALES_ORDER_STATUSES,
+        )
+        conn.executemany(
+            "INSERT OR IGNORE INTO case_statuses (name, description, sort_order) VALUES (?, ?, ?)",
+            _SEED_CASE_STATUSES,
         )
     conn.close()
 
 
-def upsert_line_item_ai_analysis(row: dict) -> None:
-    """Insert-or-replace a row in line_item_ai_analysis."""
-    conn = _connect(EUROPEAN_CUSTOM_DB)
-    with conn:
-        conn.execute(
-            """
-            INSERT INTO line_item_ai_analysis
-            (sales_order_line_item_SKU, analysis_outcome, analysis_description,
-             confidence_score, source, correct_product_category,
-             correct_vat_pct, correct_vat_value, vat_exposure)
-            VALUES
-            (:sales_order_line_item_SKU, :analysis_outcome, :analysis_description,
-             :confidence_score, :source, :correct_product_category,
-             :correct_vat_pct, :correct_vat_value, :vat_exposure)
-            ON CONFLICT(sales_order_line_item_SKU) DO UPDATE SET
-              analysis_outcome         = excluded.analysis_outcome,
-              analysis_description     = excluded.analysis_description,
-              confidence_score         = excluded.confidence_score,
-              source                   = excluded.source,
-              correct_product_category = excluded.correct_product_category,
-              correct_vat_pct          = excluded.correct_vat_pct,
-              correct_vat_value        = excluded.correct_vat_value,
-              vat_exposure             = excluded.vat_exposure
-            """,
-            row,
-        )
-    conn.close()
-
-
-# ── Historical backfill ──────────────────────────────────────────────────────
-
-def backfill_sales_order_line_item_from_transactions() -> int:
-    """
-    One-shot migration: read every row in the legacy `transactions` table and
-    insert it into `sales_order_line_item` as a single synthetic line item
-    (line_number = 1, suffix `-001`). No risk / AI rows are created — those
-    only exist for transactions that pass through the live pipeline.
-
-    Idempotent: re-running is a no-op because the SKU is deterministic and we
-    use INSERT OR REPLACE.
-
-    Returns the number of rows backfilled.
-    """
-    from lib.regions import country_region
-
+def get_vat_categories() -> list[dict]:
     conn = _connect(EUROPEAN_CUSTOM_DB)
     rows = conn.execute(
-        "SELECT transaction_id, transaction_date, "
-        "       seller_id, seller_name, seller_country, "
-        "       producer_id, producer_name, producer_country, producer_city, "
-        "       item_description, item_category, "
-        "       value, vat_rate, vat_amount, buyer_country "
-        "FROM transactions"
+        "SELECT label, rate, description FROM vat_categories ORDER BY sort_order, label"
     ).fetchall()
     conn.close()
+    return [dict(r) for r in rows]
 
-    payload: list[dict] = []
+
+def get_risk_levels() -> list[dict]:
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    rows = conn.execute(
+        "SELECT name, display_color FROM risk_levels ORDER BY sort_order, name"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_eu_regions() -> list[dict]:
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    rows = conn.execute(
+        "SELECT country_code, country_name, region FROM eu_regions ORDER BY region, country_code"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ── ML risk-rules table (4-tuple lookup + per-dimension weights) ────────────
+#
+# Single mapping table driving two things:
+#   1. Risk monitoring engine 2 (watchlist): looks up the 4-tuple
+#      (seller, country_origin, vat_product_category, country_destination)
+#      and uses `risk` to decide whether to flag.
+#   2. Case creation: populates Sales_Order_Risk dimensional scores from
+#      the four weight columns.
+# Source of truth: context/Fake ML.xlsx. Re-seeded on every backend start
+# so edits to the spreadsheet propagate after a restart.
+
+_ML_XLSX_PATH = Path(__file__).parent.parent / "context" / "Fake ML.xlsx"
+
+
+def _seed_ml_risk_rules_from_xlsx() -> None:
+    """Clear the ml_risk_rules table and re-load it from Fake ML.xlsx.
+
+    Silent no-op if the spreadsheet (or openpyxl) is missing — the engine
+    then simply flags nothing.
+    """
+    if not _ML_XLSX_PATH.exists():
+        return
+    try:
+        import openpyxl  # type: ignore
+    except ImportError:
+        return
+
+    wb = openpyxl.load_workbook(_ML_XLSX_PATH, data_only=True)
+    ws = wb[wb.sheetnames[0]]
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows or len(rows) < 2:
+        return
+    # row 0 = header; subsequent rows are data.
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    with conn:
+        conn.execute("DELETE FROM ml_risk_rules")
+        for r in rows[1:]:
+            # Skip blank rows (openpyxl gives a tuple of Nones for empty ones)
+            if r is None or all(c is None for c in r):
+                continue
+            r = list(r) + [None] * max(0, 10 - len(r))
+            conn.execute("""
+                INSERT OR REPLACE INTO ml_risk_rules (
+                    seller, country_origin, vat_product_category, country_destination,
+                    risk, description,
+                    seller_weight, country_origin_weight,
+                    vat_product_category_weight, country_destination_weight
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                (r[0] or "").strip(), (r[1] or "").strip(),
+                (r[2] or "").strip(), (r[3] or "").strip(),
+                float(r[4]) if r[4] is not None else 0.0,
+                r[5],
+                float(r[6]) if r[6] is not None else None,
+                float(r[7]) if r[7] is not None else None,
+                float(r[8]) if r[8] is not None else None,
+                float(r[9]) if r[9] is not None else None,
+            ))
+    conn.close()
+
+
+def lookup_ml_risk_rule(seller: str, country_origin: str,
+                        vat_product_category: str, country_destination: str) -> dict | None:
+    """Case-insensitive 4-tuple lookup. Returns the rule dict or None."""
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    row = conn.execute("""
+        SELECT * FROM ml_risk_rules
+        WHERE LOWER(seller)               = LOWER(?)
+          AND LOWER(country_origin)       = LOWER(?)
+          AND LOWER(vat_product_category) = LOWER(?)
+          AND LOWER(country_destination)  = LOWER(?)
+        LIMIT 1
+    """, (seller or "", country_origin or "",
+          vat_product_category or "", country_destination or "")).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_case_statuses() -> list[dict]:
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    rows = conn.execute(
+        "SELECT name, description FROM case_statuses ORDER BY sort_order, name"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_sales_order_statuses() -> list[dict]:
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    rows = conn.execute(
+        "SELECT name, description FROM sales_order_statuses ORDER BY sort_order, name"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_suspicion_types() -> list[dict]:
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    rows = conn.execute(
+        "SELECT name, description, icon, color FROM suspicion_types ORDER BY sort_order, name"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ── Case grouping: similarity check + append ────────────────────────────────
+#
+# Similar transactions (exact seller + destination + category, fuzzy
+# description) are grouped into the same open case. Similarity is
+# assessed with Jaccard word overlap on the product description.
+
+DESCRIPTION_SIMILARITY_THRESHOLD = 0.4
+
+
+def _jaccard_words(a: str, b: str) -> float:
+    """Jaccard similarity on lowercased word sets."""
+    wa = set((a or "").lower().split())
+    wb = set((b or "").lower().split())
+    if not wa or not wb:
+        return 0.0
+    return len(wa & wb) / len(wa | wb)
+
+
+def get_previous_cases(seller: str, exclude_case_id: str = "",
+                       limit: int = 20) -> list[dict]:
+    """Return closed cases from the same seller (case history)."""
+    conn = _connect(INVESTIGATION_DB)
+    rows = conn.execute("""
+        SELECT c.Case_ID, c.Status, c.VAT_Problem_Type,
+               c.Overall_Case_Risk_Score, c.Overall_Case_Risk_Level,
+               c.Created_time, c.Update_time,
+               o.Seller_Name, o.Country_Origin, o.Country_Destination,
+               o.HS_Product_Category, o.Product_Description,
+               (SELECT COUNT(*) FROM Sales_Order s2 WHERE s2.Case_ID = c.Case_ID) AS order_count,
+               c.Proposed_Action_Customs
+        FROM Sales_Order_Case c
+        LEFT JOIN Sales_Order o ON c.Sales_Order_Business_Key = o.Sales_Order_Business_Key
+        WHERE o.Seller_Name = ? AND c.Case_ID != ? AND c.Status = 'Closed'
+        ORDER BY c.Update_time DESC LIMIT ?
+    """, (seller, exclude_case_id, limit)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_correlated_cases(category: str, exclude_case_id: str = "",
+                         limit: int = 20) -> list[dict]:
+    """Return open cases with the same declared category (for correlation)."""
+    conn = _connect(INVESTIGATION_DB)
+    rows = conn.execute("""
+        SELECT c.Case_ID, c.Status, c.VAT_Problem_Type,
+               c.Overall_Case_Risk_Score, c.Overall_Case_Risk_Level,
+               c.Created_time,
+               o.Seller_Name, o.Country_Origin, o.Country_Destination,
+               o.HS_Product_Category, o.Product_Description,
+               (SELECT COUNT(*) FROM Sales_Order s2 WHERE s2.Case_ID = c.Case_ID) AS order_count
+        FROM Sales_Order_Case c
+        LEFT JOIN Sales_Order o ON c.Sales_Order_Business_Key = o.Sales_Order_Business_Key
+        WHERE o.HS_Product_Category = ? AND c.Case_ID != ? AND c.Status != 'Closed'
+        ORDER BY c.Overall_Case_Risk_Score DESC LIMIT ?
+    """, (category, exclude_case_id, limit)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def find_similar_open_case(
+    seller: str, destination: str, category: str, description: str,
+) -> dict | None:
+    """Find an open (non-Closed) case whose primary or grouped orders
+    share the same seller + destination + category AND whose product
+    description passes the Jaccard similarity threshold.
+
+    Returns the hydrated case dict or None.
+    """
+    conn = _connect(INVESTIGATION_DB)
+    # Query all Sales_Orders linked to non-Closed cases that match
+    # the exact fields. Case_ID on Sales_Order is set at creation.
+    rows = conn.execute("""
+        SELECT DISTINCT o.Case_ID, o.Product_Description, c.Status
+        FROM Sales_Order o
+        JOIN Sales_Order_Case c ON o.Case_ID = c.Case_ID
+        WHERE o.Seller_Name          = ?
+          AND o.Country_Destination  = ?
+          AND o.HS_Product_Category  = ?
+          AND c.Status               != 'Closed'
+          AND o.Case_ID IS NOT NULL
+    """, (seller or "", destination or "", category or "")).fetchall()
+    conn.close()
+
+    best_case_id = None
+    best_sim     = 0.0
     for r in rows:
-        so_id = r["transaction_id"]
-        sku   = f"{so_id}-001"
-        # Two-tier party model: producer = line-item Seller (non-EU origin),
-        # seller_* on the legacy row = DeemedImporter (EU reseller).
-        # Producer fields may be NULL for rows that predate the two-tier
-        # migration — render those as empty strings to keep the column
-        # populated rather than NULL.
-        payload.append({
-            "sales_order_line_item_SKU": sku,
-            "so_id":                     so_id,
-            "line_item_name":            sku,
-            "line_item_SKU":             sku,
-            "line_item_description":     r["item_description"],
-            "line_item_price":           r["value"],
-            "product_category":          r["item_category"],
-            "deemed_importer_id":        r["seller_id"],
-            "deemed_importer_name":      r["seller_name"],
-            "deemed_importer_country":   r["seller_country"],
-            "seller_id":                 r["producer_id"]      or None,
-            "seller_name":               r["producer_name"]    or None,
-            "seller_city":               r["producer_city"]    or None,
-            "origin_country":            r["producer_country"] or None,
-            "destination_country":       r["buyer_country"],
-            "dest_country_region":       country_region(r["buyer_country"]),
-            "VAT_pct":                   r["vat_rate"],
-            "VAT_paid":                  r["vat_amount"],
-            "date":                      r["transaction_date"],
-        })
+        sim = _jaccard_words(description, r["Product_Description"])
+        if sim >= DESCRIPTION_SIMILARITY_THRESHOLD and sim > best_sim:
+            best_sim     = sim
+            best_case_id = r["Case_ID"]
 
-    return bulk_upsert_sales_order_line_item(payload)
+    if best_case_id is None:
+        return None
+    return get_case_hydrated(best_case_id)
+
+
+def append_order_to_case(case_id: str, so_row: dict, sor_row: dict) -> None:
+    """Add a Sales_Order + Sales_Order_Risk to an existing case.
+    Sets Case_ID on the Sales_Order row. Single transaction."""
+    so_row["Case_ID"] = case_id
+    conn = _connect(INVESTIGATION_DB)
+    try:
+        with conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO Sales_Order (
+                    Sales_Order_ID, Sales_Order_Business_Key,
+                    HS_Product_Category, Product_Description, Product_Value,
+                    VAT_Rate, VAT_Fee, Seller_Name,
+                    Country_Origin, Country_Destination,
+                    Status, Update_time, Updated_by, Case_ID
+                ) VALUES (
+                    :Sales_Order_ID, :Sales_Order_Business_Key,
+                    :HS_Product_Category, :Product_Description, :Product_Value,
+                    :VAT_Rate, :VAT_Fee, :Seller_Name,
+                    :Country_Origin, :Country_Destination,
+                    :Status, :Update_time, :Updated_by, :Case_ID
+                )
+            """, so_row)
+            conn.execute("""
+                INSERT OR REPLACE INTO Sales_Order_Risk (
+                    Sales_Order_Risk_ID, Sales_Order_Business_Key,
+                    Risk_Type, Overall_Risk_Score, Overall_Risk_Level,
+                    Seller_Risk_Score, Country_Risk_Score,
+                    Product_Category_Risk_Score, Manufacturer_Risk_Score,
+                    Confidence_Score, Overall_Risk_Description,
+                    Proposed_Risk_Action, Risk_Comment,
+                    Evaluation_by, Update_time, Updated_by
+                ) VALUES (
+                    :Sales_Order_Risk_ID, :Sales_Order_Business_Key,
+                    :Risk_Type, :Overall_Risk_Score, :Overall_Risk_Level,
+                    :Seller_Risk_Score, :Country_Risk_Score,
+                    :Product_Category_Risk_Score, :Manufacturer_Risk_Score,
+                    :Confidence_Score, :Overall_Risk_Description,
+                    :Proposed_Risk_Action, :Risk_Comment,
+                    :Evaluation_by, :Update_time, :Updated_by
+                )
+            """, sor_row)
+    finally:
+        conn.close()
+
+
+def update_case_engine_scores(case_id: str, engine_scores: dict,
+                              overall_score: float, risk_level: str) -> None:
+    """Update the per-engine and overall risk scores on a case."""
+    conn = _connect(INVESTIGATION_DB)
+    with conn:
+        conn.execute("""
+            UPDATE Sales_Order_Case SET
+                Overall_Case_Risk_Score       = :Overall_Case_Risk_Score,
+                Overall_Case_Risk_Level       = :Overall_Case_Risk_Level,
+                Engine_VAT_Ratio              = :Engine_VAT_Ratio,
+                Engine_ML_Watchlist            = :Engine_ML_Watchlist,
+                Engine_IE_Seller_Watchlist     = :Engine_IE_Seller_Watchlist,
+                Engine_Description_Vagueness   = :Engine_Description_Vagueness,
+                Update_time                    = :Update_time
+            WHERE Case_ID = :Case_ID
+        """, {**engine_scores,
+              "Overall_Case_Risk_Score": overall_score,
+              "Overall_Case_Risk_Level": risk_level,
+              "Case_ID": case_id,
+              "Update_time": datetime.now(timezone.utc).isoformat()})
+    conn.close()
+
+
+def get_risk_engine_signals() -> list[dict]:
+    """Return the reference table mapping field names to display names."""
+    conn = _connect(INVESTIGATION_DB)
+    rows = conn.execute("SELECT * FROM risk_engine_signals").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_case_transaction_count(case_id: str) -> int:
+    """Count Sales_Order rows linked to a case."""
+    conn = _connect(INVESTIGATION_DB)
+    n = conn.execute(
+        "SELECT COUNT(*) FROM Sales_Order WHERE Case_ID = ?", (case_id,)
+    ).fetchone()[0]
+    conn.close()
+    return n
+
+
+def update_sales_order_status(business_key: str, status: str) -> bool:
+    """Update Sales_Order.Status in investigation.db for a given business key."""
+    conn = _connect(INVESTIGATION_DB)
+    with conn:
+        cur = conn.execute(
+            "UPDATE Sales_Order SET Status = ?, Update_time = ? WHERE Sales_Order_Business_Key = ?",
+            (status, datetime.now(timezone.utc).isoformat(), business_key),
+        )
+    changed = cur.rowcount > 0
+    conn.close()
+    return changed
+
+
+def seed_open_cases_if_empty() -> int:
+    """Copy all rows from data/seed_cases.db into investigation.db when
+    the latter currently has zero cases. Idempotent: a no-op if cases
+    already exist or if the seed file is missing.
+
+    Returns the number of cases inserted (0 if no seeding occurred).
+    """
+    if not SEED_CASES_DB.exists():
+        return 0
+    target = _connect(INVESTIGATION_DB)
+    try:
+        n = target.execute("SELECT COUNT(*) FROM Sales_Order_Case").fetchone()[0]
+        if n > 0:
+            return 0
+        src = sqlite3.connect(SEED_CASES_DB)
+        src.row_factory = sqlite3.Row
+        try:
+            with target:
+                # Order matters because of the FK from Risk → Order
+                for table in ("Sales_Order", "Sales_Order_Risk", "Sales_Order_Case"):
+                    rows = src.execute(f"SELECT * FROM {table}").fetchall()
+                    for r in rows:
+                        cols = ",".join(r.keys())
+                        placeholders = ",".join("?" * len(r.keys()))
+                        target.execute(
+                            f"INSERT OR REPLACE INTO {table} ({cols}) VALUES ({placeholders})",
+                            list(r),
+                        )
+            inserted = target.execute("SELECT COUNT(*) FROM Sales_Order_Case").fetchone()[0]
+            return inserted
+        finally:
+            src.close()
+    finally:
+        target.close()
+
+
+def reset_cases() -> None:
+    """Clear all 3 case-side tables in investigation.db (simulation reset)."""
+    conn = _connect(INVESTIGATION_DB)
+    with conn:
+        conn.execute("DELETE FROM Sales_Order_Case")
+        conn.execute("DELETE FROM Sales_Order_Risk")
+        conn.execute("DELETE FROM Sales_Order")
+    conn.close()
+
+
+# ── Atomic 3-row insert into investigation.db ────────────────────────────────
+#
+# Used by the C&T Risk Management Factory when a retain/investigate
+# ASSESSMENT_OUTCOME arrives. All three rows succeed or none do.
+
+def upsert_investigation_set(so_row: dict, sor_row: dict, soc_row: dict) -> None:
+    """Atomic insert of Sales_Order + Sales_Order_Risk + Sales_Order_Case
+    into investigation.db. Single transaction."""
+    conn = _connect(INVESTIGATION_DB)
+    try:
+        with conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO Sales_Order (
+                    Sales_Order_ID, Sales_Order_Business_Key,
+                    HS_Product_Category, Product_Description, Product_Value,
+                    VAT_Rate, VAT_Fee, Seller_Name,
+                    Country_Origin, Country_Destination,
+                    Status, Update_time, Updated_by, Case_ID
+                ) VALUES (
+                    :Sales_Order_ID, :Sales_Order_Business_Key,
+                    :HS_Product_Category, :Product_Description, :Product_Value,
+                    :VAT_Rate, :VAT_Fee, :Seller_Name,
+                    :Country_Origin, :Country_Destination,
+                    :Status, :Update_time, :Updated_by, :Case_ID
+                )
+            """, so_row)
+            conn.execute("""
+                INSERT OR REPLACE INTO Sales_Order_Risk (
+                    Sales_Order_Risk_ID, Sales_Order_Business_Key,
+                    Risk_Type, Overall_Risk_Score, Overall_Risk_Level,
+                    Seller_Risk_Score, Country_Risk_Score,
+                    Product_Category_Risk_Score, Manufacturer_Risk_Score,
+                    Confidence_Score, Overall_Risk_Description,
+                    Proposed_Risk_Action, Risk_Comment,
+                    Evaluation_by, Update_time, Updated_by
+                ) VALUES (
+                    :Sales_Order_Risk_ID, :Sales_Order_Business_Key,
+                    :Risk_Type, :Overall_Risk_Score, :Overall_Risk_Level,
+                    :Seller_Risk_Score, :Country_Risk_Score,
+                    :Product_Category_Risk_Score, :Manufacturer_Risk_Score,
+                    :Confidence_Score, :Overall_Risk_Description,
+                    :Proposed_Risk_Action, :Risk_Comment,
+                    :Evaluation_by, :Update_time, :Updated_by
+                )
+            """, sor_row)
+            conn.execute("""
+                INSERT OR REPLACE INTO Sales_Order_Case (
+                    Case_ID, Sales_Order_Business_Key, Status,
+                    VAT_Problem_Type, Recommended_Product_Value,
+                    Recommended_VAT_Product_Category, Recommended_VAT_Rate,
+                    Recommended_VAT_Fee, AI_Analysis, AI_Confidence,
+                    VAT_Gap_Fee, Evaluation_by,
+                    Proposed_Action_Tax, Proposed_Action_Customs,
+                    Communication, Additional_Evidence,
+                    Update_time, Updated_by, Created_time,
+                    Overall_Case_Risk_Score, Overall_Case_Risk_Level,
+                    Engine_VAT_Ratio, Engine_ML_Watchlist,
+                    Engine_IE_Seller_Watchlist, Engine_Description_Vagueness
+                ) VALUES (
+                    :Case_ID, :Sales_Order_Business_Key, :Status,
+                    :VAT_Problem_Type, :Recommended_Product_Value,
+                    :Recommended_VAT_Product_Category, :Recommended_VAT_Rate,
+                    :Recommended_VAT_Fee, :AI_Analysis, :AI_Confidence,
+                    :VAT_Gap_Fee, :Evaluation_by,
+                    :Proposed_Action_Tax, :Proposed_Action_Customs,
+                    :Communication, :Additional_Evidence,
+                    :Update_time, :Updated_by, :Created_time,
+                    :Overall_Case_Risk_Score, :Overall_Case_Risk_Level,
+                    :Engine_VAT_Ratio, :Engine_ML_Watchlist,
+                    :Engine_IE_Seller_Watchlist, :Engine_Description_Vagueness
+                )
+            """, soc_row)
+    finally:
+        conn.close()
+
+
+_HYDRATED_CASE_SQL = """
+    SELECT
+        c.*,
+        o.Sales_Order_ID,
+        o.HS_Product_Category, o.Product_Description, o.Product_Value,
+        o.VAT_Rate, o.VAT_Fee, o.Seller_Name,
+        o.Country_Origin, o.Country_Destination,
+        r.Sales_Order_Risk_ID,
+        r.Risk_Type,
+        r.Overall_Risk_Score, r.Overall_Risk_Level,
+        r.Seller_Risk_Score, r.Country_Risk_Score,
+        r.Product_Category_Risk_Score, r.Manufacturer_Risk_Score,
+        r.Confidence_Score, r.Proposed_Risk_Action,
+        r.Overall_Risk_Description,
+        (SELECT COUNT(*) FROM Sales_Order s2 WHERE s2.Case_ID = c.Case_ID) AS transaction_count
+    FROM Sales_Order_Case c
+    LEFT JOIN Sales_Order      o ON c.Sales_Order_Business_Key = o.Sales_Order_Business_Key
+    LEFT JOIN Sales_Order_Risk r ON c.Sales_Order_Business_Key = r.Sales_Order_Business_Key
+"""
+
+
+def _hydrate_row(r) -> dict:
+    import json as _json
+    d = dict(r)
+    try:
+        d["Communication"] = _json.loads(d["Communication"]) if d.get("Communication") else []
+    except Exception:
+        d["Communication"] = []
+    return d
+
+
+def get_case_orders(case_id: str) -> list[dict]:
+    """Return all Sales_Order + Sales_Order_Risk rows for a case."""
+    conn = _connect(INVESTIGATION_DB)
+    rows = conn.execute("""
+        SELECT o.Sales_Order_ID, o.Sales_Order_Business_Key,
+               o.HS_Product_Category, o.Product_Description, o.Product_Value,
+               o.VAT_Rate, o.VAT_Fee, o.Seller_Name,
+               o.Country_Origin, o.Country_Destination,
+               r.Overall_Risk_Score, r.Overall_Risk_Level,
+               r.Seller_Risk_Score, r.Country_Risk_Score,
+               r.Product_Category_Risk_Score, r.Manufacturer_Risk_Score,
+               r.Confidence_Score
+        FROM Sales_Order o
+        LEFT JOIN Sales_Order_Risk r ON o.Sales_Order_Business_Key = r.Sales_Order_Business_Key
+        WHERE o.Case_ID = ?
+        ORDER BY o.Sales_Order_ID
+    """, (case_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def _hydrate_with_orders(r, conn) -> dict:
+    """Hydrate a case row and attach all its orders."""
+    d = _hydrate_row(r)
+    case_id = d.get("Case_ID")
+    if case_id:
+        orders = conn.execute("""
+            SELECT o.Sales_Order_ID, o.Sales_Order_Business_Key,
+                   o.HS_Product_Category, o.Product_Description, o.Product_Value,
+                   o.VAT_Rate, o.VAT_Fee, o.Seller_Name,
+                   o.Country_Origin, o.Country_Destination,
+                   r.Overall_Risk_Score, r.Overall_Risk_Level
+            FROM Sales_Order o
+            LEFT JOIN Sales_Order_Risk r ON o.Sales_Order_Business_Key = r.Sales_Order_Business_Key
+            WHERE o.Case_ID = ?
+            ORDER BY o.Sales_Order_ID
+        """, (case_id,)).fetchall()
+        d["orders"] = [dict(o) for o in orders]
+    else:
+        d["orders"] = []
+    return d
+
+
+def get_all_cases_hydrated(status: str | None = None, limit: int = 200) -> list[dict]:
+    """Return cases joined with Sales_Order + Sales_Order_Risk, with all orders attached."""
+    conn = _connect(INVESTIGATION_DB)
+    if status:
+        sql = _HYDRATED_CASE_SQL + " WHERE c.Status = ? ORDER BY c.Created_time ASC LIMIT ?"
+        rows = conn.execute(sql, (status, limit)).fetchall()
+    else:
+        sql = _HYDRATED_CASE_SQL + " ORDER BY c.Created_time ASC LIMIT ?"
+        rows = conn.execute(sql, (limit,)).fetchall()
+    result = [_hydrate_with_orders(r, conn) for r in rows]
+    conn.close()
+    return result
+
+
+def get_case_hydrated(case_id: str) -> dict | None:
+    """Single case joined with Sales_Order + Sales_Order_Risk, with all orders attached."""
+    conn = _connect(INVESTIGATION_DB)
+    sql = _HYDRATED_CASE_SQL + " WHERE c.Case_ID = ? LIMIT 1"
+    row = conn.execute(sql, (case_id,)).fetchone()
+    if not row:
+        conn.close()
+        return None
+    result = _hydrate_with_orders(row, conn)
+    conn.close()
+    return result
+
+
+# ── Data hub upserts (3 dark-purple tables) ──────────────────────────────────
+

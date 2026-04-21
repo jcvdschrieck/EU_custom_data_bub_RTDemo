@@ -46,6 +46,9 @@ _DEFAULT_CODES: dict[str, str] = {
 _TOPIC_SALES_ORDER    = "sales_order_event"
 _TOPIC_RT_RISK_1      = "rt_risk_1_outcome"
 _TOPIC_RT_RISK_2      = "rt_risk_2_outcome"
+_TOPIC_RT_RISK_3      = "rt_risk_3_outcome"
+_TOPIC_RT_RISK_4      = "rt_risk_4_outcome"
+_TOPIC_ASSESSMENT     = "assessment_outcome"
 _TOPIC_RT_SCORE       = "rt_score"
 _TOPIC_ORDER_VAL      = "order_validation"
 _TOPIC_ARRIVAL        = "arrival_notification"
@@ -55,6 +58,7 @@ _TOPIC_INVESTIGATE    = "investigate_event"
 _TOPIC_AGENT_RETAIN   = "agent_retain_event"
 _TOPIC_AGENT_RELEASE  = "agent_release_event"
 _TOPIC_RELEASE_AFTER  = "release_after_investigation_event"
+_TOPIC_CUSTOM_OUTCOME = "custom_outcome"
 
 # Flat fields that are internal-only and should be stripped from file payloads
 _INTERNAL_FLAT_FIELDS = frozenset({
@@ -281,6 +285,7 @@ def build_file_payload(topic: str, message: dict) -> dict:
     # Lightweight outcome message for all other topics
     order_id = (
         message.get("orderIdentifier")
+        or message.get("order_id")
         or (message.get("tx") or {}).get("orderIdentifier")
         or (message.get("tx") or {}).get("transaction_id")
         or message.get("sales_order_id")
@@ -289,13 +294,34 @@ def build_file_payload(topic: str, message: dict) -> dict:
 
     if topic == _TOPIC_RT_RISK_1:
         outcome = {
+            "risk":     message.get("risk"),
             "flagged":  message.get("flagged"),
             "alarm_id": message.get("alarm_id"),
         }
     elif topic == _TOPIC_RT_RISK_2:
         outcome = {
+            "risk":    message.get("risk"),
             "flagged": message.get("flagged"),
             "reason":  message.get("reason"),
+        }
+    elif topic == _TOPIC_RT_RISK_3:
+        outcome = {
+            "risk":    message.get("risk"),
+            "flagged": message.get("flagged"),
+            "reason":  message.get("reason"),
+        }
+    elif topic == _TOPIC_RT_RISK_4:
+        outcome = {
+            "risk":    message.get("risk"),
+            "flagged": message.get("flagged"),
+            "reason":  message.get("reason"),
+        }
+    elif topic == _TOPIC_ASSESSMENT:
+        outcome = {
+            "route":              message.get("route"),
+            "Overall_Risk_Score": message.get("Overall_Risk_Score"),
+            "Confidence_Score":   message.get("Confidence_Score"),
+            "engine_outcomes":    message.get("engine_outcomes", {}),
         }
     elif topic == _TOPIC_RT_SCORE:
         outcome = {
@@ -326,6 +352,8 @@ def build_file_payload(topic: str, message: dict) -> dict:
         outcome = {"verdict": message.get("verdict")}
     elif topic == _TOPIC_RELEASE_AFTER:
         outcome = {"verdict": message.get("verdict"), "risk_score": "cleared"}
+    elif topic == _TOPIC_CUSTOM_OUTCOME:
+        outcome = {"status": message.get("status")}
     else:
         outcome = {}
 
