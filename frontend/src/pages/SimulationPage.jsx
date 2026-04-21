@@ -987,10 +987,10 @@ function KpiStrip({ pipeline }) {
       tooltip: 'Sales Order Release + Release Post Inv. — total transactions cleared for release (both automated and post-investigation).' },
     { key: 'retained',     label: 'Retained',           value: retained,          color: '#c0392b',
       tooltip: 'Sales Order Retained + Retain Post Inv. — total transactions flagged as suspicious and retained (both automated and post-investigation).' },
-    { key: 'investigated', label: 'Investigated',       value: investigated,      color: '#e6820a',
-      tooltip: 'Investigations the VAT Fraud Detection Agent has completed (produced a verdict: correct, uncertain, or incorrect).' },
-    { key: 'underInv',     label: 'Under Investigation', value: underInvestigation, color: '#9c27b0',
+    { key: 'underInv',     label: 'Under Investigation', value: underInvestigation, color: '#e6820a',
       tooltip: 'Transactions currently in the Tax queue — waiting for the Tax officer to act or being analysed by the VAT Fraud Detection Agent.' },
+    { key: 'investigated', label: 'Investigated',       value: investigated,      color: '#9c27b0',
+      tooltip: 'Investigations the VAT Fraud Detection Agent has completed (produced a verdict: correct, uncertain, or incorrect).' },
   ]
 
   return (
