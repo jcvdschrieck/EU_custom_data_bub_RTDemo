@@ -251,6 +251,28 @@ def _new_tx_id(rng: random.Random) -> str:
     return f"TX-{uuid.UUID(int=rng.getrandbits(128)).hex[:12].upper()}"
 
 
+def _jitter_ml_once(rng: random.Random, pre_baked: float) -> float:
+    """Jitter the xlsx ML score (Score 3 / 100) to a continuous value.
+
+    ML risk is a function of (seller, origin, category, destination) —
+    all four fields are identical for every tx in a cluster. So the
+    jittered value is applied ONCE per xlsx parent row, not per tx;
+    every sibling inheriting from the same parent inherits the same
+    ML reading. Within-case variability on ML stays near zero, which
+    matches the ML model's actual behaviour.
+
+    Keeps the same buckets as the xlsx (0 / 0.40 / 0.90), just nudged
+    off the hard values so the UI doesn't show suspicious round
+    numbers like 0.00 or 0.40.
+    """
+    if pre_baked <= 0.0:
+        return round(rng.uniform(0.03, 0.10), 3)
+    if pre_baked >= 0.8:
+        return round(pre_baked + rng.uniform(-0.04, 0.06), 3)
+    # Mid bucket around 0.40
+    return round(pre_baked + rng.uniform(-0.05, 0.05), 3)
+
+
 def _jitter_vagueness(rng: random.Random, pre_baked: float) -> float:
     """Return a per-tx vagueness score that looks like the output of an
     actual embedding-model cosine similarity rather than the xlsx's
@@ -367,6 +389,13 @@ def seed_simulation_db_from_xlsx() -> int:
     src = pd.read_excel(SOURCE_XLSX, sheet_name="VAT Missclassification Last")
     fml = pd.read_excel(FAKE_ML_XLSX, sheet_name="Per-Tx Expected Engine Outputs")
     fml_by_idx = {int(r["xlsx_row_index"]): r.to_dict() for _, r in fml.iterrows()}
+
+    # Apply ML jitter once per xlsx row so every sibling of a given
+    # parent carries the SAME ML reading. ML is a function of (seller,
+    # origin, category, destination), so within-cluster variability is
+    # zero by construction.
+    for rec in fml_by_idx.values():
+        rec["expected_ml_risk"] = _jitter_ml_once(rng, float(rec["expected_ml_risk"]))
 
     # Pre-resolve sellers by name to spare per-row lookups.
     seller_by_name = {s["name"]: s for s in vat_dataset.SELLERS}
