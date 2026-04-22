@@ -8,6 +8,13 @@ data/*.db-wal
 # Pre-seeded open cases — small, deliberately versioned so demos work
 # out of the box. Rebuild with `python scripts/build_seed_cases.py`.
 !data/seed_cases.db
+# Pre-seeded simulation transactions (new dataset, 290 rows from
+# lib/new_seeder.py). Tracked so a fresh clone can start the sim
+# without running seed_databases.py. Regenerate with
+# `python seed_databases.py`. The fired flag is reset on every API
+# boot (lib/database.reset_simulation_db) so running a sim does not
+# leave a persistent diff against the committed baseline.
+!data/simulation.db
 frontend/node_modules/
 frontend/dist/
 data/events/
@@ -17,3 +24,7 @@ Context/*
 # lib/vat_dataset.py + Stage-2 engines have the file out of the box.
 !Context/Fake_ML.xlsx
 !Context/Fake ML.xlsx
+# Source xlsx for the new dataset. Tracked so the seeder and
+# regenerate_* scripts have their inputs out of the box on a
+# fresh clone.
+!Context/VAT_Cases_Generated_17042026_6.xlsx
