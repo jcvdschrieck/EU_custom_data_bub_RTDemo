@@ -1858,11 +1858,21 @@ Answer based ONLY on the case data below. If the data doesn't contain the answer
 
 {case_context}"""
 
+    # Merge system prompt into the user turn — Mistral-family prompt
+    # templates loaded in LM Studio reject the separate "system" role
+    # ("Only user and assistant roles are supported!"). Prepending the
+    # instructions to the user message works with every chat template
+    # we ship with.
+    user_turn = (
+        f"{system_prompt}\n\n"
+        f"-----\n"
+        f"Officer question: {question}"
+    )
+
     try:
         client = LMStudioClient()
         answer = await client.chat([
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": question},
+            {"role": "user", "content": user_turn},
         ], temperature=0.3, max_tokens=300, priority=PRIORITY_INTERACTIVE)
         await client.aclose()
         return {"answer": answer}
