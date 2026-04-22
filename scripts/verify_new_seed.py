@@ -92,10 +92,11 @@ def main() -> None:
     # ── 1. Cluster Jaccard checks ────────────────────────────────────────────
     clusters: dict[tuple[str, str, str], list[sqlite3.Row]] = defaultdict(list)
     for r in rows:
-        # Only investigate-route rows form clusters in the seeder. The
-        # cluster prefix tokens carry the seller-dest-cat tag with a
-        # "-shipment" suffix on the first token (see lib.new_seeder).
-        if "-shipment " in (r["item_description"] or ""):
+        # Only investigate-route rows form clusters in the seeder.
+        # Every cluster member's description ends with the 6 cluster-
+        # tagged markers introduced by " — lot-…" (see
+        # lib.new_seeder._cluster_markers).
+        if " — lot-" in (r["item_description"] or ""):
             key = (r["seller_name"], r["buyer_country"], r["item_category"])
             clusters[key].append(r)
 

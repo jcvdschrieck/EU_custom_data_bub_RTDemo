@@ -98,33 +98,113 @@ def _category_code(parent_category: str) -> str:
     return "".join(w[0].upper() for w in parent_category.split() if w[0].isalpha())[:3]
 
 
-def _cluster_prefix(seller_name: str, destination: str, parent_category: str) -> str:
-    """5-token phrase where every token encodes the cluster identity.
+_PRODUCT_POOL: dict[str, list[str]] = {
+    "ELECTRONICS & ACCESSORIES": [
+        "Bluetooth wireless earbuds",
+        "USB-C charging hub",
+        "Laptop stand aluminium",
+        "Phone charging case",
+        "Smart plug WiFi",
+        "Mechanical keyboard RGB",
+        "4K webcam HDR",
+        "Wireless mouse ergonomic",
+        "Monitor stand dual-arm",
+        "HDMI switch 4-port",
+        "Smart home speaker",
+        "LED desk lamp",
+    ],
+    "CLOTHING & TEXTILES": [
+        "Cotton crew-neck shirt",
+        "Wool winter coat",
+        "Denim slim jeans",
+        "Silk printed scarf",
+        "Leather handbag classic",
+        "Linen summer dress",
+        "Sports jacket waterproof",
+        "Cashmere sweater knit",
+    ],
+    "COSMETICS & PERSONAL CARE": [
+        "Vitamin C serum",
+        "Retinol night cream",
+        "Mineral sunscreen SPF50",
+        "Argan oil treatment",
+        "Brightening face mask",
+        "Gentle face wash",
+        "Body butter shea",
+        "Eau de parfum",
+    ],
+    "TOYS": [
+        "Electronic learning kit",
+        "Wooden puzzle set",
+        "Outdoor play cones",
+        "Plush bear stuffed",
+        "Craft hobby kit",
+        "Educational flashcards pack",
+        "Building block set",
+        "Costume dress-up",
+    ],
+    "FOOD PRODUCTS": [
+        "Dark chocolate bar",
+        "Cereal breakfast box",
+        "Organic olive oil",
+        "Dried pasta semolina",
+        "Manuka honey jar",
+        "Pet food kibble",
+        "Confectionery gift box",
+    ],
+    "FOOD SUPPLEMENTS & VITAMINS": [
+        "Vitamin D3 K2",
+        "Omega-3 fish oil",
+        "Magnesium complex tablets",
+        "Probiotic capsules strain",
+        "Protein powder whey",
+        "Ashwagandha root extract",
+        "Collagen peptides drink",
+    ],
+    "BOOKS, PUBLICATIONS & DIGITAL CONTENT": [
+        "Educational textbook pack",
+        "Digital reader subscription",
+        "Art history volume",
+        "Cookbook recipes illustrated",
+        "Children storybook classic",
+    ],
+    "SPORTS & LEISURE / DIGITAL SERVICES": [
+        "Cycling helmet pro",
+        "Running shoes carbon",
+        "Yoga mat premium",
+        "Sports watch GPS",
+    ],
+}
 
-    Design constraint: cross-cluster Jaccard must stay below 0.4 even
-    when two clusters share the same destination or category. We achieve
-    this by suffixing every prefix word with the cluster ID, so no two
-    clusters share any prefix token. Intra-cluster Jaccard stays high
-    because all 5 prefix tokens are identical for siblings.
+
+def _cluster_markers(seller_name: str, destination: str, parent_category: str) -> str:
+    """6 cluster-tagged tokens — the Jaccard anchor.
+
+    Each token embeds a cluster id (SELLER-DEST-CAT) so the tokens are
+    unique across clusters: cross-cluster Jaccard stays near zero
+    regardless of how many clusters share destination or category.
+    Within a cluster all 6 tokens are identical, which keeps intra-
+    cluster Jaccard around 0.5 even when product phrases and unit
+    numbers differ between siblings.
     """
     cid = f"{_seller_code(seller_name)}-{destination}-{_category_code(parent_category)}"
-    return (f"{cid}-shipment {cid}-lot {cid}-consignment {cid}-line {cid}-grade")
+    return (
+        f"lot-{cid} ref-{cid} shipment-{cid} "
+        f"batch-{cid} manifest-{cid} series-{cid}"
+    )
 
 
-def _per_tx_suffix(rng: random.Random, base_description: str | None,
-                   sibling_idx: int) -> str:
-    """Differentiator appended after the cluster prefix.
+def _pick_product_phrase(rng: random.Random, parent_category: str,
+                         member_idx: int) -> str:
+    """Choose a realistic product phrase for this transaction.
 
-    For xlsx rows we keep a short distinctive trailer derived from the
-    original Product Name so the case still looks plausible to a
-    reviewer. Synthetic siblings get a numbered variant tag. Tokens
-    here are not constrained to be unique across clusters — the
-    Jaccard story is carried entirely by the cluster prefix.
+    Rotates deterministically through the category pool by
+    member_idx so adjacent tx in a cluster get different phrases,
+    then adds a small random jitter offset for variety across runs.
     """
-    if sibling_idx == 0 and base_description:
-        words = [w for w in base_description.split() if len(w) > 2][:4]
-        return " ".join(words) if words else f"variant {sibling_idx + 1:02d}"
-    return f"variant {chr(ord('A') + (sibling_idx % 26))} batch {sibling_idx + 1:02d}"
+    pool = _PRODUCT_POOL.get(parent_category) or ["imported goods assorted"]
+    jitter = rng.randrange(len(pool))
+    return pool[(member_idx + jitter) % len(pool)]
 
 
 # ── Seeding ─────────────────────────────────────────────────────────────────
@@ -245,7 +325,7 @@ def seed_simulation_db_from_xlsx() -> int:
         seller_dict = seller_by_name[seller_name]
         target_size = _INVESTIGATE_CLUSTER_SIZE[_dest_tier(destination)]
         target_size = max(len(group), target_size)
-        prefix      = _cluster_prefix(seller_name, destination, parent_cat)
+        markers     = _cluster_markers(seller_name, destination, parent_cat)
 
         xlsx_records = [
             {"orig_idx": int(idx), "data": row.to_dict()}
@@ -260,11 +340,11 @@ def seed_simulation_db_from_xlsx() -> int:
             for sibling_idx in range(siblings_needed)
         ]
 
-        for rec, sibling_idx in cluster_members:
-            xrow      = rec["data"]
-            orig_idx  = rec["orig_idx"]
-            base_desc = xrow["Product Description (declared)"]
-            description = f"{prefix} — {_per_tx_suffix(rng, base_desc, sibling_idx)}"
+        for member_idx, (rec, sibling_idx) in enumerate(cluster_members):
+            xrow     = rec["data"]
+            orig_idx = rec["orig_idx"]
+            phrase   = _pick_product_phrase(rng, parent_cat, member_idx)
+            description = f"{phrase} unit {member_idx + 1:03d} — {markers}"
 
             row = _build_tx_row(
                 rng=rng,
