@@ -45,15 +45,44 @@ FAKE_ML_XLSX = ROOT / "Context" / "Fake_ML.xlsx"
 # Seed for reproducibility — change only when intentionally regenerating.
 _RNG_SEED = 20260401
 
-# Cluster size distribution: triangular(1, 5, 15). Caller picks size for
-# each investigate (seller, dest, parent_cat) cluster. Median lands ~5.
-_CLUSTER_SIZE_MIN  = 1
-_CLUSTER_SIZE_MODE = 5
-_CLUSTER_SIZE_MAX  = 15
-
 # Value distribution: uniform [10, 150). Below the EU IOSS threshold (€150).
 _VALUE_MIN = 10.0
 _VALUE_MAX = 150.0
+
+# ── Amplification strategy ─────────────────────────────────────────────────
+# Each xlsx source row spawns N transactions in simulation.db: the xlsx row
+# itself + (N-1) synthetic children that inherit the row's declared/
+# recommended VAT categories and pre-baked engine outputs verbatim. The
+# child ONLY differs in transaction_id, timestamp, value, and description.
+#
+# Factors tuned so:
+#   - Total tx ≈ 2000.
+#   - Route proportions preserve the xlsx split (~79% release, ~17%
+#     investigate, ~4% retain).
+#   - Ireland-destined volume is a minority of the total (≈13%) but
+#     Ireland investigate clusters are amplified to ~30 tx each so the
+#     C&T frontend (which filters to Country_Destination == "IE") shows
+#     rich, multi-order cases.
+#
+# ("target_cluster_size", N) for investigate rows scales the whole
+# cluster — siblings are shared across the cluster's xlsx rows. For
+# release/retain (no clustering) the factor is per-row.
+_INVESTIGATE_CLUSTER_SIZE = {
+    "IE":     30,   # 4 clusters × 30 ≈ 120 tx
+    "non-IE": 14,   # 15 clusters × 14 ≈ 210 tx
+}
+_RELEASE_COPIES_PER_ROW = {
+    "IE":     4,    # 35 rows × 4 = 140
+    "non-IE": 12,   # 116 rows × 12 = 1392
+}
+_RETAIN_COPIES_PER_ROW  = {
+    "IE":     12,   # (no IE retain rows in xlsx, kept for symmetry)
+    "non-IE": 12,   # 8 rows × 12 = 96
+}
+
+
+def _dest_tier(destination: str) -> str:
+    return "IE" if destination == "IE" else "non-IE"
 
 
 # ── Description rewriter ────────────────────────────────────────────────────
@@ -202,7 +231,7 @@ def seed_simulation_db_from_xlsx() -> int:
 
     rows: list[dict] = []
 
-    # ── Pass 1: investigate-route rows + their synthetic siblings ───────────
+    # ── Pass 1: investigate clusters (xlsx rows + amplified siblings) ───────
     investigate_mask = src["Customs Authority Action (Calculated)"].str.lower() == "investigate"
     investigate_rows = src[investigate_mask]
 
@@ -210,16 +239,14 @@ def seed_simulation_db_from_xlsx() -> int:
         ["Seller", "Destination Country", "VAT Category (declared)"], sort=True
     )
 
-    cluster_summary: list[tuple[str, str, str, int, int]] = []  # for reporting
+    cluster_summary: list[tuple[str, str, str, int, int]] = []
 
     for (seller_name, destination, parent_cat), group in cluster_groups:
         seller_dict = seller_by_name[seller_name]
-        target_size = int(round(rng.triangular(_CLUSTER_SIZE_MIN, _CLUSTER_SIZE_MAX, _CLUSTER_SIZE_MODE)))
-        target_size = max(len(group), min(_CLUSTER_SIZE_MAX, target_size))
-        prefix = _cluster_prefix(seller_name, destination, parent_cat)
+        target_size = _INVESTIGATE_CLUSTER_SIZE[_dest_tier(destination)]
+        target_size = max(len(group), target_size)
+        prefix      = _cluster_prefix(seller_name, destination, parent_cat)
 
-        # The xlsx rows for this cluster — keep their per-row signals;
-        # rewrite description with the shared prefix.
         xlsx_records = [
             {"orig_idx": int(idx), "data": row.to_dict()}
             for idx, row in group.iterrows()
@@ -228,9 +255,6 @@ def seed_simulation_db_from_xlsx() -> int:
         cluster_summary.append((seller_name, destination, parent_cat,
                                 len(xlsx_records), target_size))
 
-        # Sibling parents: cycle through xlsx records so each sibling
-        # inherits from a real source row (declared/recommended cat+rate,
-        # engine outputs).
         cluster_members = [(rec, 0) for rec in xlsx_records] + [
             (xlsx_records[sibling_idx % len(xlsx_records)], sibling_idx + 1)
             for sibling_idx in range(siblings_needed)
@@ -256,23 +280,39 @@ def seed_simulation_db_from_xlsx() -> int:
             )
             rows.append(row)
 
-    # ── Pass 2: release + retain rows (no clustering, descriptions kept) ────
+    # ── Pass 2: release + retain rows (per-row amplification, no clusters) ──
+    # Release and retain tx bypass the C&T factory, so they do not need
+    # cluster-friendly descriptions. Each xlsx row spawns N copies, each
+    # with a fresh tx_id / timestamp / value / description (the copies
+    # otherwise inherit the xlsx row's declared & recommended categories
+    # and pre-baked engine outputs verbatim).
+    route_by_label = {"release": _RELEASE_COPIES_PER_ROW,
+                      "retain":  _RETAIN_COPIES_PER_ROW}
     other_rows = src[~investigate_mask]
     for orig_idx, xrow in other_rows.iterrows():
+        route       = _route_from_action(xrow["Customs Authority Action (Calculated)"])
+        copies      = route_by_label[route][_dest_tier(xrow["Destination Country"])]
         seller_dict = seller_by_name[xrow["Seller"]]
-        row = _build_tx_row(
-            rng=rng,
-            timestamp_iso="",
-            seller_dict=seller_dict,
-            destination=xrow["Destination Country"],
-            parent_category=xrow["VAT Category (declared)"],
-            declared_subcat=xrow["VAT Code (declared)"],
-            declared_rate=float(xrow["VAT Rate (%)"]) / 100.0,
-            recommended_rate=float(xrow["VAT Rate (Recommended)"]) / 100.0,
-            description=str(xrow["Product Description (declared)"]),
-            fake_ml_row=fml_by_idx[int(orig_idx)],
-        )
-        rows.append(row)
+        base_desc   = str(xrow["Product Description (declared)"])
+
+        for copy_idx in range(copies):
+            description = (
+                base_desc if copy_idx == 0
+                else f"{base_desc} — lot {copy_idx + 1:03d}"
+            )
+            row = _build_tx_row(
+                rng=rng,
+                timestamp_iso="",
+                seller_dict=seller_dict,
+                destination=xrow["Destination Country"],
+                parent_category=xrow["VAT Category (declared)"],
+                declared_subcat=xrow["VAT Code (declared)"],
+                declared_rate=float(xrow["VAT Rate (%)"]) / 100.0,
+                recommended_rate=float(xrow["VAT Rate (Recommended)"]) / 100.0,
+                description=description,
+                fake_ml_row=fml_by_idx[int(orig_idx)],
+            )
+            rows.append(row)
 
     # ── Pass 3: assign timestamps inside the sim window ─────────────────────
     timestamps = _evenly_spaced_timestamps(len(rows), rng)
@@ -289,15 +329,19 @@ def seed_simulation_db_from_xlsx() -> int:
     bulk_insert(rows, path=SIMULATION_DB)
 
     # Report
-    investigate_count = sum(1 for r in rows if r["engine_vat_ratio_risk"] is not None
-                            and (r["has_error"] or r["engine_ml_risk"] > 0 or r["engine_vagueness_risk"] > 0))
+    from collections import Counter
+    by_dest  = Counter(r["buyer_country"] for r in rows)
+    ie_count    = by_dest.get("IE", 0)
+    non_ie_count = sum(n for d, n in by_dest.items() if d != "IE")
+
     print(f"  source xlsx rows:              {len(src)}")
     print(f"  investigate clusters:          {len(cluster_summary)}")
-    print(f"  → cluster sizes (min/median/max): "
-          f"{min(s[4] for s in cluster_summary)}/"
-          f"{sorted(s[4] for s in cluster_summary)[len(cluster_summary)//2]}/"
-          f"{max(s[4] for s in cluster_summary)}")
+    sizes = [s[4] for s in cluster_summary]
+    print(f"  → cluster sizes (min/median/max): {min(sizes)}/{sorted(sizes)[len(sizes)//2]}/{max(sizes)}")
     print(f"  total tx written:              {len(rows)}")
+    print(f"  by destination:                IE={ie_count} ({ie_count/len(rows):.1%})  "
+          f"non-IE={non_ie_count} ({non_ie_count/len(rows):.1%})")
+    print(f"    {dict(by_dest)}")
     return len(rows)
 
 
