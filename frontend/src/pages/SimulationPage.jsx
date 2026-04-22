@@ -1233,13 +1233,13 @@ function PipelineDiagram({ pipeline }) {
                     {/* Stacked RT1 + RT2 + RT4 engine factories with arrows */}
                     <div style={{ display: 'flex', flexDirection: 'column', gap: RT_ROW_GAP }}>
                       <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center', gap: 4 }}>
-                        <FactoryNode icon="⚖️" label="VAT Ratio Monitor" description="7-day vs 8-week baseline" sm width={RT_FACTORY_W}
-                          tooltip="VAT Ratio Monitor — flags transactions whose VAT-to-value ratio deviates from the supplier's historical baseline (7-day window vs 8-week average). Binary risk: 0.0 or 1.0." />
+                        <FactoryNode icon="⚖️" label="VAT Rate Mismatch" description="declared vs expected rate" sm width={RT_FACTORY_W}
+                          tooltip="VAT Rate Mismatch — compares the declared VAT rate on each order against the rate the EU expects for the declared product subcategory in the destination country. Graded risk (0–1) reflecting how severe the misclassification is." />
                         <Arrow />
                       </div>
                       <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center', gap: 4 }}>
-                        <FactoryNode icon="🔍" label="ML Risk Classifier" description="4-tuple rule lookup" sm width={RT_FACTORY_W}
-                          tooltip="ML Risk Classifier — looks up the 4-tuple (seller × origin × category × destination) against ml_risk_rules. Returns a continuous risk score 0–1 plus per-dimension weights." />
+                        <FactoryNode icon="🔍" label="ML Risk Classifier" description="learned from past cases" sm width={RT_FACTORY_W}
+                          tooltip="ML Risk Classifier — a supplier-risk model trained on past transaction analyses. Produces a continuous risk score (0–1) and the per-dimension contributors (seller, origin, category, destination) that led to it." />
                         <Arrow />
                       </div>
                       <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center', gap: 4 }}>
