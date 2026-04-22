@@ -543,49 +543,57 @@ def slide_thresholds(prs):
 
 def slide_aggregation(prs):
     s = prs.slides.add_slide(prs.slide_layouts[6])
-    _slide_header(s, "Contribution shares & case-level averaging",
-                  "How the per-engine and overall figures in the C&T UI are computed")
+    _slide_header(s, "UI readouts & case-level averaging",
+                  "What the C&T Risk Signals panel shows, and how the backend produces it")
 
-    # Left: contribution share
-    _add_bullet_box(s, Inches(0.5), Inches(1.3), Inches(6.2), Inches(2.8),
-                    "Per-engine CONTRIBUTION SHARE (UI)", [
-                        "For each engine: weighted = engine_avg × ENGINE_WEIGHTS[engine].",
-                        "Total = sum of weighted contributions across the 4 engines.",
-                        "Share displayed in 'Risk Signals' panel = weighted / total × 100 %.",
-                        "By construction the four shares sum to ≈ 100 %, so officers can "
-                        "eyeball which engine dominates the case.",
-                        "Raw engine severity is also shown underneath the share (the band "
-                        "that set the pre-baked value — 0.02–0.08 quiet, 0.55–0.70 firing).",
+    # Left: what's on the Risk Signals panel
+    _add_bullet_box(s, Inches(0.5), Inches(1.3), Inches(6.2), Inches(3.4),
+                    "Risk Signals panel — two numbers per engine", [
+                        "MAIN: contribution in POINTS, on the same 0..100 scale as the "
+                        "overall case risk score. A bar visualises each contribution.",
+                        "SECONDARY (right-aligned, small): engine's SHARE of the case risk "
+                        "(its weighted contribution / sum of the four weighted "
+                        "contributions, normalised to 100 %).",
+                        "Intended reading: the MAIN number tells how much this signal "
+                        "adds to the overall score; the SHARE tells which signal "
+                        "dominates relative to the others.",
+                        "NARRATIVE: each row carries a context-aware one-liner — fires / "
+                        "mild / quiet — so officers see what the engine is saying "
+                        "without reading raw scores.",
+                        "Raw engine severity and engine weights are NOT displayed in the "
+                        "UI (avoid inviting questions about weight tuning). They remain "
+                        "in the backend logs and this deck.",
                     ], fill=WHITE, edge=EU_BLUE)
 
     # Right: case-level running average
-    _add_bullet_box(s, Inches(7.0), Inches(1.3), Inches(5.8), Inches(2.8),
+    _add_bullet_box(s, Inches(7.0), Inches(1.3), Inches(5.8), Inches(3.4),
                     "Case-level RUNNING AVERAGE (backend)", [
                         "When a new order joins an existing case (C&T factory detects a "
                         "similar open case by Jaccard ≥ 0.4 on description):",
                         "  n = orders in the case after this one is appended",
-                        "  Engine_X_new  = (Engine_X_old × (n-1) + order_Engine_X) / n",
-                        "  Overall_new   = (Overall_old  × (n-1) + order_score)   / n",
+                        "  Engine_X_new = (Engine_X_old × (n-1) + order_Engine_X) / n",
+                        "  Overall_new  = (Overall_old  × (n-1) + order_score)    / n",
                         "Each engine field on Sales_Order_Case is an arithmetic mean "
                         "across every order in the case — not a snapshot of the first "
                         "transaction.",
+                        "Contribution pts and share used in the UI are computed from "
+                        "these case-level averages.",
                     ], fill=WHITE, edge=EU_BLUE)
 
     # Caveat block at the bottom
-    _add_bullet_box(s, Inches(0.5), Inches(4.3), Inches(12.3), Inches(2.8),
-                    "⚠ Non-linearity caveat — shares are an approximation", [
-                        "Per-order score passes through the weighted sum AND the vat_ratio "
-                        "floor AND the min(1.0, …) cap. Only the linear part (weighted sum) "
-                        "commutes with averaging.",
-                        "Consequence: Overall_Case_Risk_Score ≠ Σ ENGINE_WEIGHTS × Engine_X_avg "
-                        "whenever the floor or the cap fired on any order in the case.",
-                        "For cases where no order ever crossed the floor (raw vat_ratio < 0.30 "
-                        "everywhere) and no order ever hit the cap (total weighted ≤ 1.0), "
-                        "the two are exactly equal and the shares reconstruct the overall.",
-                        "For cases where floor/cap fired on some orders, the displayed "
-                        "shares still sum to 100 % and still rank engines correctly by "
-                        "contribution, but reconstructing the overall from them involves "
-                        "a small residual that carries the floor/cap effect.",
+    _add_bullet_box(s, Inches(0.5), Inches(4.9), Inches(12.3), Inches(2.3),
+                    "⚠ Why the contributions only SUM APPROXIMATELY to the overall", [
+                        "Per-order score passes through the weighted sum AND the "
+                        "vat_ratio floor AND the min(1.0, …) cap. Only the weighted-sum "
+                        "part commutes with averaging across orders.",
+                        "Consequence: Σ (ENGINE_WEIGHTS × Engine_X_avg) ≠ "
+                        "Overall_Case_Risk_Score whenever the floor or the cap fired on "
+                        "any order in the case — small residual on the order of a few "
+                        "points.",
+                        "Officer-facing implication: the four contribution bars sum to "
+                        "roughly the overall score; shares sum to 100 %. Both are "
+                        "approximations of the same underlying case-level risk, useful "
+                        "for different questions.",
                     ], fill=SHORTCUT_BG, edge=SHORTCUT_EDGE, title_color=SHORTCUT_EDGE,
                     body_size=12)
 
