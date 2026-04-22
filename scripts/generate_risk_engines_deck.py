@@ -295,31 +295,32 @@ def slide_engine_vat_ratio(prs):
             "subcategory (e.g. 'Basic food 0 %') when the product is actually standard-rated.",
         ],
         algorithm=[
-            "Key the tx by (buyer_country, vat_subcategory_code).",
-            "Look up the expected rate via lib.vat_dataset.expected_rate_for(...). "
-            "The lookup is built from the 78 observed (dest, subcat) pairs in the xlsx; "
-            "for unobserved pairs it falls back to the destination's standard rate.",
-            "Compare declared_rate to expected_rate — emit 1.0 on mismatch, 0.0 on match.",
-            "Floor behaviour at consolidation: when raw risk ≥ 0.30 the engine's "
-            "contribution is floored to ≥ 0.334 so any genuine rate mismatch at least "
-            "investigates, regardless of weighting.",
+            "Key each tx by (destination country, declared VAT subcategory).",
+            "Consult the canonical (destination × subcategory) → rate table "
+            "maintained by the EU VAT Expected-Rate service.",
+            "Compare the declared rate to the expected rate. The engine score "
+            "reflects how severe the mismatch is (graded 0 – 1).",
+            "Severe mismatches trigger an investigate floor at consolidation "
+            "(see the Consolidation slide).",
         ],
         output=[
-            "risk ∈ [0, 1] — graded (raw = Score 1 / 100 from xlsx) when pre-baked; "
-            "binary 0/1 from the subcategory lookup otherwise.",
-            "reason: prebaked / rate_mismatch / rate_match / unknown_subcategory / alarm_*",
+            "Engine score in [0, 1] — 0 for a clean match, higher as the declared "
+            "rate drifts further from the expected rate.",
+            "reason: rate_mismatch / rate_match / unknown_subcategory",
             "applicable: always True.",
         ],
         shortcuts=[
-            "Pre-baked value: every tx in simulation.db carries "
-            "engine_vat_ratio_risk set at seed time from xlsx Score 1 ÷ 100, "
-            "GATED by actual rate mismatch (xlsx zeroes Score 1 when declared = "
-            "recommended, i.e. misclassification with no revenue impact).",
-            "Legacy fallback (historical seeder only): 7-day vs 8-week VAT/value "
-            "volume-ratio alarm. Kept so Sep–Feb historical transactions still "
-            "route through the pipeline without pre-baked fields.",
-            "Demo benefit: routing is deterministic and reproducible from the xlsx — "
-            "no need for the seeder to compute rate tables at runtime.",
+            "The demo dataset pre-bakes the engine score at seed time from "
+            "xlsx Score 1 ÷ 100, gated by actual rate mismatch (xlsx zeroes "
+            "Score 1 when declared = recommended — i.e. category mismatch "
+            "with no revenue impact, which is not actionable).",
+            "Engine reads engine_vat_ratio_risk off the tx row verbatim "
+            "rather than recomputing from the subcategory table each run.",
+            "Legacy fallback (historical seeder only): 7-day vs 8-week VAT/"
+            "value volume-ratio alarm. Kept so Sep–Feb historical transactions "
+            "still route through the pipeline without pre-baked fields.",
+            "Demo benefit: routing is deterministic and reproducible from "
+            "the xlsx — no need to maintain a live expected-rate table.",
         ],
     )
 
@@ -332,36 +333,49 @@ def slide_engine_ml(prs):
         engine_id="watchlist",
         weight=0.9,
         detects=[
-            "Per-tx supplier compliance risk: how often has this (seller, origin, "
-            "category, destination) pattern been flagged historically?",
+            "Per-tx supplier compliance risk: does this (seller, origin, product "
+            "category, destination) pattern look like seller behaviours the "
+            "authority has flagged in past investigations?",
             "Produces a graded score plus four per-dimension contributors "
             "(seller, origin, category, destination) that surface in the case.",
         ],
         algorithm=[
-            "Look up the 4-tuple (seller, origin, declared_category, destination) "
-            "against lib.database.ml_risk_rules.",
-            "If a rule matches: emit rule.risk plus the four weighted contributors.",
-            "If no rule matches: emit risk = 0.0 (clear).",
+            "A supervised ML model trained on the authority's historical "
+            "closed-case dataset (confirmed fraud vs. cleared).",
+            "Retraining cadence is offline and periodic — e.g. a nightly or "
+            "weekly batch job against the latest labelled cases. It is NOT "
+            "retrained in the live path.",
+            "At pipeline runtime only INFERENCE happens: the tx's four features "
+            "(seller, origin, declared category, destination) go into the most "
+            "recently trained model, which returns a risk score and per-"
+            "dimension contribution weights.",
             "Flag threshold: ML_RISK_FLAG_THRESHOLD = 0.5 (informational; the "
-            "consolidator uses the raw risk).",
+            "consolidator uses the engine score directly).",
         ],
         output=[
-            "risk ∈ [0, 1] — graded, discrete buckets from xlsx (0, 0.40, 0.90).",
+            "Engine score in [0, 1] — probability-like, continuous in production.",
             "description, seller_risk, country_risk, product_category_risk, "
-            "destination_risk — propagated into ASSESSMENT_OUTCOME and written onto "
+            "destination_risk — the four per-dimension contributions to the risk. "
+            "Propagated into ASSESSMENT_OUTCOME and written onto "
             "Sales_Order_Risk at case creation.",
-            "reason: prebaked_match / prebaked_clear / ml_watchlist_match / clear",
+            "reason: match / clear",
         ],
         shortcuts=[
-            "Pre-baked value: engine_ml_risk set per-tx at seed time from xlsx "
-            "Score 3 ÷ 100 (0, 0.40, or 0.90). Contributor weights also pre-baked — "
-            "all attributed to the seller dimension (seller_contribution = 1.0) since "
-            "xlsx Score 3 captures supplier risk specifically.",
-            "Legacy fallback: 4-tuple rule lookup in ml_risk_rules table, seeded from "
-            "Context/Fake ML.xlsx. Used only when pre-baked field is NULL (legacy "
-            "historical tx).",
-            "Demo benefit: avoids training or shipping an actual model; "
-            "xlsx Score 3 is the ground-truth 'ML output'.",
+            "No live model in the demo — the entire ML path is replaced by a "
+            "pre-baked memoised-inference table.",
+            "TWO-LAYER LOOKUP (both are just static tables seeded at build time):",
+            "  1. Per-tx overrides (new dataset). The seeder writes engine_ml_risk "
+            "     plus the four contributors directly onto each tx row, sourced "
+            "     from xlsx Score 3 ÷ 100 (0, 0.40, or 0.90). Engine reads these "
+            "     off the tx verbatim.",
+            "  2. Legacy 4-tuple table. For tx that lack the per-tx override "
+            "     (Sep–Feb historical rows) the engine falls back to a lookup "
+            "     against ml_risk_rules in european_custom.db, seeded once from "
+            "     Context/Fake ML.xlsx and keyed on (seller, origin, category, "
+            "     destination).",
+            "Demo benefit: deterministic, reproducible, and avoids the "
+            "operational burden of training + serving a real classifier; the "
+            "xlsx scores play the role of the trained model's output.",
         ],
     )
 
@@ -374,39 +388,41 @@ def slide_engine_ie(prs):
         engine_id="ireland_watchlist",
         weight=1.0,
         detects=[
-            "Country-specific signal hosted (in production) on a server managed by "
-            "the Irish authority.",
-            "Checks whether a given (seller_id, seller_country) pair is on "
-            "Ireland's local blacklist.",
+            "A country-specific signal: whether the seller of this tx is on the "
+            "blacklist maintained by the Irish authority.",
+            "Applies only to IE-destined orders. Non-IE orders are marked "
+            "applicable = False and excluded from the consolidator's denominator.",
         ],
         algorithm=[
-            "Subscribe to every SALES_ORDER_EVENT but only PROCESS events whose "
-            "buyer_country == 'IE'.",
-            "Non-IE events are immediately published with applicable = False and "
-            "excluded from the consolidator's denominator.",
-            "Apply a random 1–5 second sleep simulating the round-trip to a "
-            "remote server. Because that latency can exceed ASSESSMENT_TIMER_S (3 s), "
-            "some IE outcomes legitimately arrive after the consolidator has already "
-            "published — by design.",
-            "Look up (seller_id, seller_country) in the IE_WATCHLIST frozenset; "
-            "emit 1.0 on match, 0.0 on miss.",
+            "In production the engine calls out to a service hosted by the "
+            "Irish authority, which keeps an authoritative (seller_id, "
+            "seller_country) blacklist — updated and administered outside the "
+            "EU hub.",
+            "Per request: look up the pair and return match / clear.",
+            "Only IE-bound tx are queried; for everything else the engine "
+            "short-circuits with applicable = False.",
         ],
         output=[
-            "risk ∈ [0, 1] — binary (1.0 match / 0.0 miss) in production; "
-            "graded 0.0 pre-bake in the current dataset.",
+            "Engine score in [0, 1] — binary in production (1.0 match / 0.0 miss).",
             "applicable = False for non-IE tx (engine drops out of denominator).",
-            "reason: prebaked_clear / ie_watchlist_match / clear / not_applicable",
+            "reason: ie_watchlist_match / clear / not_applicable",
         ],
         shortcuts=[
-            "Static set IE_WATCHLIST in lib/watchlist.py is currently EMPTY. All "
-            "IE-destined tx land in 'clear'.",
-            "Pre-baked value: engine_ie_watchlist_risk = 0.0 for every IE tx at "
-            "seed time so the engine stays on the pre-baked path rather than "
+            "No live Irish-authority service in the demo — replaced by a "
+            "static in-memory set IE_WATCHLIST in lib/watchlist.py, "
+            "currently EMPTY so every IE tx lands in 'clear'.",
+            "Per-tx pre-bake: engine_ie_watchlist_risk = 0.0 on every IE tx at "
+            "seed time so the engine uses the pre-baked value rather than "
             "hitting the empty set.",
-            "Demo benefit: demonstrates the country-specific-engine pattern "
-            "(latency, applicability, remote hosting) without actually importing an "
-            "Irish authority feed. The empty watchlist keeps the engine visible in "
-            "every case breakdown at 0 %.",
+            "Network-latency simulation (1–5 s random sleep) is added in the "
+            "fallback path to reproduce the real round-trip to the remote "
+            "service. Because the sleep can exceed ASSESSMENT_TIMER_S (3 s), "
+            "some IE outcomes legitimately arrive after the consolidator has "
+            "published — intentional, exercises the 'late outcome' branch.",
+            "Demo benefit: shows the country-specific-engine pattern (remote "
+            "authority, applicability gate) without needing an actual external "
+            "feed. Empty watchlist keeps the engine visible at 0 % on every IE "
+            "case breakdown.",
         ],
     )
 
@@ -461,13 +477,22 @@ def slide_consolidation(prs):
     _slide_header(s, "Score consolidation — weighted sum ≤ 1",
                   "api.py _release_factory._compute_score")
 
+    _add_bullet_box(s, Inches(0.5), Inches(1.25), Inches(12.3), Inches(1.15),
+                    "What each engine emits", [
+                        "Each engine publishes an ENGINE SCORE in [0, 1] — its own "
+                        "reading of how suspicious this single tx looks on that "
+                        "dimension. 0 = clean, 1 = maximally suspicious. Different "
+                        "engines use different scales (binary, graded, probabilistic); "
+                        "the consolidator is what ties them into one case-level score.",
+                    ], fill=WHITE, edge=EU_BLUE, title_size=14, body_size=11)
+
     formula = (
-        "score = min( 1.0 ,  Σ  ENGINE_WEIGHTS[eng] × engine.risk   for every "
-        "APPLICABLE engine )"
+        "case_score = min( 1.0 ,  Σ  ENGINE_WEIGHTS[eng] × engine_score[eng]   "
+        "for every APPLICABLE engine )"
     )
-    _add_rect(s, Inches(0.6), Inches(1.4), Inches(12.1), Inches(0.8),
+    _add_rect(s, Inches(0.6), Inches(2.55), Inches(12.1), Inches(0.6),
               fill=BG_LIGHT, edge=EU_BLUE, text=formula,
-              font_size=16, bold=True, color=EU_BLUE)
+              font_size=14, bold=True, color=EU_BLUE)
 
     # Weights table
     weights = [
@@ -476,38 +501,39 @@ def slide_consolidation(prs):
         ("ireland_watchlist",     "1.0"),
         ("description_vagueness", "0.8"),
     ]
-    _add_text_box(s, Inches(0.6), Inches(2.5), Inches(5.0), Inches(0.4),
-                  "ENGINE_WEIGHTS", font_size=15, bold=True, color=EU_BLUE)
+    _add_text_box(s, Inches(0.6), Inches(3.3), Inches(4.5), Inches(0.35),
+                  "ENGINE_WEIGHTS", font_size=13, bold=True, color=EU_BLUE)
     for i, (name, w) in enumerate(weights):
-        y = Inches(2.9 + i * 0.5)
-        _add_rect(s, Inches(0.6), y, Inches(3.4), Inches(0.45),
+        y = Inches(3.65 + i * 0.42)
+        _add_rect(s, Inches(0.6), y, Inches(3.0), Inches(0.38),
                   fill=WHITE, edge=SUBTLE_GREY, text=name,
-                  font_size=12, align=PP_ALIGN.LEFT)
-        _add_rect(s, Inches(4.0), y, Inches(1.0), Inches(0.45),
+                  font_size=11, align=PP_ALIGN.LEFT)
+        _add_rect(s, Inches(3.6), y, Inches(0.8), Inches(0.38),
                   fill=EU_GOLD, edge=SUBTLE_GREY, text=w,
-                  font_size=12, bold=True)
+                  font_size=11, bold=True)
 
-    _add_bullet_box(s, Inches(5.8), Inches(2.5), Inches(7.0), Inches(2.7),
+    _add_bullet_box(s, Inches(5.0), Inches(3.3), Inches(7.8), Inches(2.2),
                     "vat_ratio floor", [
-                        "When a tx's raw vat_ratio ≥ 0.30, the engine's contribution is "
-                        "floored to ≥ THRESHOLD_RELEASE + ε (≈ 0.334).",
-                        "Policy stance: any genuine rate mismatch above the xlsx's "
-                        "release tier (Score 1 ≥ 30) must at least INVESTIGATE, "
-                        "regardless of its weighted contribution.",
-                        "Trigger (0.30) sits between xlsx Release tier (Score 1 = 25) "
-                        "and Investigate tier (Score 1 ≥ 37.5). No row that xlsx "
-                        "releases gets unexpectedly bumped up.",
-                    ], fill=SHORTCUT_BG, edge=SHORTCUT_EDGE, title_color=SHORTCUT_EDGE)
+                        "Policy stance: any tx whose vat_ratio engine score ≥ 0.30 "
+                        "must at least INVESTIGATE, regardless of its weight.",
+                        "Mechanism: when this triggers, the vat_ratio engine's "
+                        "WEIGHTED contribution is lifted to THRESHOLD_RELEASE + ε "
+                        "(≈ 0.334) before the sum — so even a graded rate mismatch "
+                        "can't be released on a low weight alone.",
+                        "Trigger score (0.30) sits between the xlsx Release tier "
+                        "(Score 1 = 25) and Investigate tier (Score 1 ≥ 37.5).",
+                    ], fill=SHORTCUT_BG, edge=SHORTCUT_EDGE,
+                    title_color=SHORTCUT_EDGE, title_size=14, body_size=11)
 
-    _add_bullet_box(s, Inches(0.6), Inches(5.5), Inches(12.2), Inches(1.8),
+    _add_bullet_box(s, Inches(0.6), Inches(5.7), Inches(12.2), Inches(1.6),
                     "Applicability & confidence", [
-                        "Engines may self-report applicable = False (e.g. IE watchlist on "
-                        "non-IE tx). Those engines are excluded from the sum AND from the "
-                        "denominator used for confidence.",
-                        "confidence = applicable_received / applicable_expected. 0 %, 25 %, "
-                        "50 %, 75 %, or 100 %.",
-                        "If zero applicable engines report, score defaults to 0.5 (uncertain).",
-                    ], fill=WHITE, edge=SUBTLE_GREY, body_size=12)
+                        "Engines may self-report applicable = False (e.g. IE watchlist "
+                        "on non-IE tx). Those engines are excluded from the sum AND "
+                        "from the denominator used for confidence.",
+                        "confidence = applicable_received / applicable_expected "
+                        "(0 %, 25 %, 50 %, 75 %, or 100 %). If zero applicable "
+                        "engines report, case_score defaults to 0.5 (uncertain).",
+                    ], fill=WHITE, edge=SUBTLE_GREY, title_size=14, body_size=11)
 
 
 def slide_thresholds(prs):
