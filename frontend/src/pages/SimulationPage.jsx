@@ -135,9 +135,13 @@ function BrokerNode({ label, topicKey, count, children, accent, sm, tooltip, wid
   const innerColor = accent || blue
   const innerBg    = hasAccent ? (BROKER_SUB_BG[accent] || '#ffffff') : '#ffffff'
   const defaultMinW = sm ? 100 : 130
+  // Preserve the backend topic key in the hover tooltip so developers
+  // can still look it up, even though it's no longer shown in the header.
+  const fullTooltip = [tooltip, topicKey ? `topic: ${topicKey}` : null]
+    .filter(Boolean).join(' — ')
   return (
     <div
-      title={tooltip}
+      title={fullTooltip || undefined}
       style={{
         background: 'var(--eu-blue-light)',
         border: `2px solid ${blue}`,
@@ -146,27 +150,25 @@ function BrokerNode({ label, topicKey, count, children, accent, sm, tooltip, wid
         width: width || undefined,
         minWidth: width || defaultMinW,
         textAlign: 'center', flex: '0 0 auto',
-        cursor: tooltip ? 'help' : 'default',
+        cursor: (fullTooltip) ? 'help' : 'default',
         boxSizing: 'border-box',
       }}>
-      {/* Outer: topic key header */}
+      {/* Outer header — human-readable label (was previously duplicated
+          inside the white sub-box). The backend topic key is still
+          preserved in the title/tooltip attribute for developer lookup. */}
       <div style={{
-        fontSize: 7, color: blue, textTransform: 'uppercase',
-        letterSpacing: '0.06em', marginBottom: 3, fontWeight: 700,
-      }}>{topicKey}</div>
+        fontSize: sm ? 9 : 10, color: blue, fontWeight: 700,
+        letterSpacing: '0.02em', marginBottom: 3, lineHeight: 1.2,
+      }}>{label}</div>
 
-      {/* Inner sub-box: label + count + "events", colored by accent (if any) */}
+      {/* Inner sub-box: count + "events", colored by accent (if any).
+          Label removed — it now lives in the blue header above. */}
       <div style={{
         background: innerBg,
         border: `1.5px solid ${innerColor}`,
         borderRadius: 3,
-        padding: sm ? '2px 4px 3px' : '3px 6px 4px',
+        padding: sm ? '3px 4px 4px' : '4px 6px 5px',
       }}>
-        <div style={{
-          fontSize: sm ? 9 : 10, fontWeight: 700,
-          color: 'var(--text-primary)',
-          lineHeight: 1.2, marginBottom: 1,
-        }}>{label}</div>
         <div style={{
           fontSize: sm ? 15 : 18, fontWeight: 700,
           color: innerColor, lineHeight: 1,
@@ -808,12 +810,12 @@ function MiddleSection({ ev, rf, customs, tax, taxRunning, stored, newStored, H,
           display: 'flex', flexDirection: 'column', alignItems: 'center',
           gap: 6, height: 'calc(100% - 32px)', justifyContent: 'center',
         }}>
-          <FactoryNode icon="🚪" label="Exit Process Factory" description="emits CUSTOM_OUTCOME" sm
-            tooltip="Exit Process Factory — subscribes to Assessment Outcome (release + retain routes) and Investigation Outcome. Emits one CUSTOM_OUTCOME event per completed order; persistence to the legacy hub is deactivated." />
+          <FactoryNode icon="🚪" label="Consolidation Factory" description="emits events for MS operational system" sm
+            tooltip="Consolidation Factory — subscribes to Assessment Outcome (release + retain routes) and Investigation Outcome. Emits one event per completed order on the Events for MS Operational System broker; persistence to the legacy hub is deactivated." />
           <Arrow down />
-          <BrokerNode label="Custom Outcome" topicKey="CUSTOM_OUTCOME" sm
+          <BrokerNode label="Events for MS Operational System" topicKey="CUSTOM_OUTCOME" sm
             count={customTotal}
-            tooltip={`Terminal CUSTOM_OUTCOME broker — ${customTotal} events. Status breakdown: automated_release ${customStatus.automated_release || 0}, custom_release ${customStatus.custom_release || 0}, custom_retain ${customStatus.custom_retain || 0}.`}>
+            tooltip={`Events for MS Operational System (terminal broker) — ${customTotal} events. Status breakdown: automated_release ${customStatus.automated_release || 0}, custom_release ${customStatus.custom_release || 0}, custom_retain ${customStatus.custom_retain || 0}.`}>
             <CustomOutcomeBreakdown s={customStatus} />
           </BrokerNode>
         </div>
@@ -983,9 +985,9 @@ function KpiStrip({ pipeline }) {
   const tiles = [
     { key: 'ingested',     label: 'Ingested',           value: ingested,          color: 'var(--eu-blue)',
       tooltip: 'Sales-order events fired by the simulation engine (entry to the pipeline).' },
-    { key: 'released',     label: 'Released',           value: released,          color: '#1f7a3c',
+    { key: 'released',     label: 'To be released',     value: released,          color: '#1f7a3c',
       tooltip: 'Sales Order Release + Release Post Inv. — total transactions cleared for release (both automated and post-investigation).' },
-    { key: 'retained',     label: 'Retained',           value: retained,          color: '#c0392b',
+    { key: 'retained',     label: 'To be retained',     value: retained,          color: '#c0392b',
       tooltip: 'Sales Order Retained + Retain Post Inv. — total transactions flagged as suspicious and retained (both automated and post-investigation).' },
     { key: 'underInv',     label: 'Under Investigation', value: underInvestigation, color: '#e6820a',
       tooltip: 'Transactions currently in the Tax queue — waiting for the Tax officer to act or being analysed by the VAT Fraud Detection Agent.' },
@@ -1028,6 +1030,7 @@ function PipelineDiagram({ pipeline }) {
   const dbStoreRef = useRef(null)
   const invOutcomeRef = useRef(null)
   const dbHubRef = useRef(null)
+  const msConsumerRef = useRef(null)
   const containerRef = useRef(null)
   const [overlayPaths, setOverlayPaths] = useState(null)
 
@@ -1066,13 +1069,26 @@ function PipelineDiagram({ pipeline }) {
       }
       ctBottom = ctRect.bottom - cRect.top
       const hub = dbHubRef.current
+      let hubMidX = 0, hubMidBottomY = 0
       if (hub) {
         const hRect = hub.getBoundingClientRect()
         hubRight = hRect.right - cRect.left + 8
         hubBottom = hRect.bottom - cRect.top + 8
+        hubMidX = hRect.left + hRect.width / 2 - cRect.left
+        hubMidBottomY = hRect.bottom - cRect.top
+      }
+      // Arrow target: Member State Consuming Systems factory.
+      let mscX = 0, mscTopY = 0
+      const mscEl = msConsumerRef.current
+      if (mscEl) {
+        const mscRect = mscEl.getBoundingClientRect()
+        mscX = mscRect.left + mscRect.width / 2 - cRect.left
+        mscTopY = mscRect.top - cRect.top
       }
       const containerH = cRect.height
-      setOverlayPaths({ ex, ey, ctx, cty, dbx, dby, dbTop, ix, iy, iLeft, iBottom, ctBottom, hubRight, hubBottom, containerH })
+      setOverlayPaths({ ex, ey, ctx, cty, dbx, dby, dbTop, ix, iy, iLeft, iBottom,
+                        ctBottom, hubRight, hubBottom,
+                        hubMidX, hubMidBottomY, mscX, mscTopY, containerH })
     }
     update()
     const id = setInterval(update, 2000)
@@ -1188,6 +1204,28 @@ function PipelineDiagram({ pipeline }) {
               children. */}
           <div ref={containerRef} style={{ display: 'flex', alignItems: 'flex-start', gap: 0, position: 'relative' }}>
 
+            {/* Full-width Member State Systems band — sits behind the flex
+                content at the Y position of the MS row, making it visually
+                clear that the MS area spans the entire pipeline width (i.e.
+                is a "Member State" territory distinct from the EU systems
+                above). pointerEvents:none so it doesn't intercept clicks. */}
+            <div style={{
+              position: 'absolute',
+              top: OV_H + LGAP + RT_H + LGAP,
+              left: 0, right: 0, height: MS_H,
+              border: '1px dashed #8fb8de',
+              borderRadius: 6,
+              background: '#f6f9fc',
+              zIndex: 0,
+              pointerEvents: 'none',
+            }}>
+              <div style={{
+                fontSize: 10, fontWeight: 700, color: '#8fb8de',
+                textTransform: 'uppercase', letterSpacing: '0.08em',
+                textAlign: 'center', marginTop: 4,
+              }}>Member State Systems</div>
+            </div>
+
             {/* Entry Broker — anchored at yRT so it aligns horizontally with
                 RT Risk Outcome and Automated Assessment Factory. */}
             <div style={{ height: ROW1_H, paddingTop: Math.max(0, yRT - 55), boxSizing: 'border-box' }}>
@@ -1233,17 +1271,17 @@ function PipelineDiagram({ pipeline }) {
                     {/* Stacked RT1 + RT2 + RT4 engine factories with arrows */}
                     <div style={{ display: 'flex', flexDirection: 'column', gap: RT_ROW_GAP }}>
                       <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center', gap: 4 }}>
-                        <FactoryNode icon="⚖️" label="VAT Rate Mismatch" description="declared vs expected rate" sm width={RT_FACTORY_W}
+                        <FactoryNode icon="⚖️" label="VAT Rate Mismatch" sm width={RT_FACTORY_W}
                           tooltip="VAT Rate Mismatch — compares the declared VAT rate on each order against the rate the EU expects for the declared product subcategory in the destination country. Graded risk (0–1) reflecting how severe the misclassification is." />
                         <Arrow />
                       </div>
                       <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center', gap: 4 }}>
-                        <FactoryNode icon="🔍" label="ML Risk Classifier" description="learned from past cases" sm width={RT_FACTORY_W}
-                          tooltip="ML Risk Classifier — a supplier-risk model trained on past transaction analyses. Produces a continuous risk score (0–1) and the per-dimension contributors (seller, origin, category, destination) that led to it." />
+                        <FactoryNode icon="🔍" label="Supplier Risk" sm width={RT_FACTORY_W}
+                          tooltip="Supplier Risk — a supplier-risk ML model trained on past transaction analyses. Produces a continuous risk score (0–1) and the per-dimension contributors (seller, origin, category, destination) that led to it." />
                         <Arrow />
                       </div>
                       <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center', gap: 4 }}>
-                        <FactoryNode icon="📝" label="Vagueness Detector" description="product description NLP" sm width={RT_FACTORY_W}
+                        <FactoryNode icon="📝" label="Vagueness Detector" sm width={RT_FACTORY_W}
                           tooltip="Vagueness Detector — scores how vague or generic the product description is (0 = specific, 1 = vague). Uses sentence embeddings (all-MiniLM-L6-v2) and cosine similarity to a vague-text anchor." />
                         <Arrow />
                       </div>
@@ -1252,21 +1290,20 @@ function PipelineDiagram({ pipeline }) {
                 </Zone>
               </div>
 
-              {/* Member State Risk Monitors — separate dashed zone */}
-              <div style={{ height: MS_H, display: 'flex', alignItems: 'center' }}>
+              {/* IE Seller Watchlist — the dashed border + header moved to
+                  the full-width Member State Systems band rendered at the
+                  container root (so the MS area spans the whole pipeline).
+                  The factory sits on top of the band (zIndex:1) with a
+                  transparent wrapper that only reserves layout space. */}
+              <div style={{ height: MS_H, display: 'flex', alignItems: 'center',
+                            position: 'relative', zIndex: 1 }}>
                 <div style={{
                   width: ZONE_W, height: '100%', boxSizing: 'border-box',
-                  border: '1px dashed #8fb8de', borderRadius: 6,
-                  padding: '6px 10px',
-                  background: '#f6f9fc',
+                  padding: '6px 10px 6px 10px',
                 }}>
-                  <div style={{
-                    fontSize: 9, fontWeight: 700, color: '#8fb8de',
-                    textTransform: 'uppercase', letterSpacing: '0.08em',
-                    textAlign: 'center', marginBottom: 4,
-                  }}>Member State Risk Monitors</div>
-                  <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: 'calc(100% - 24px)' }}>
-                    <FactoryNode icon="🇮🇪" label="IE Seller Watchlist" description="1–5 s · Ireland only" sm width={RT_FACTORY_W}
+                  <div style={{ display: 'flex', justifyContent: 'center',
+                                alignItems: 'center', height: '100%', paddingTop: 16 }}>
+                    <FactoryNode icon="🇮🇪" label="IE Seller Watchlist" sm width={RT_FACTORY_W}
                       tooltip="IE Seller Watchlist — Ireland-specific watchlist managed by the Irish customs authority. Only processes IE-bound orders; others are silently dropped. Uniform 1–5 s latency simulating a remote server. Can arrive after the assessment timer (3 s), demonstrating late-arriving engine results." />
                     <div style={{ width: 8 }} />
                     <Arrow />
@@ -1300,9 +1337,9 @@ function PipelineDiagram({ pipeline }) {
                   tooltip="ORDER_VALIDATION — field-completeness outcome per order. Consumed by the Automated Assessment Factory." />
               </div>
               <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
-                <BrokerNode label="RT Risk Outcome" topicKey="RT_RISK_OUTCOME"
+                <BrokerNode label="Near Real-time Risk Signals" topicKey="RT_RISK_OUTCOME"
                   count={(ev.rt_risk_1_outcome || 0) + (ev.rt_risk_2_outcome || 0) + (ev.rt_risk_3_outcome || 0) + (ev.rt_risk_4_outcome || 0)} sm width={OUT_BROKER_W}
-                  tooltip="RT_RISK_OUTCOME — unified topic. All risk engines (EU + Member State) publish here with an engine identifier. The Automated Assessment Factory subscribes and computes a consolidated risk score.">
+                  tooltip="Near Real-time Risk Signals — unified topic. All risk engines (EU + Member State) publish here with an engine identifier. The Automated Assessment Factory subscribes and computes a consolidated risk score.">
                   <FlaggedBadge flagged={(rf.rt_risk_1_flagged || 0) + (rf.rt_risk_2_flagged || 0) + (rf.rt_risk_3_flagged || 0) + (rf.rt_risk_4_flagged || 0)}
                     total={(ev.rt_risk_1_outcome || 0) + (ev.rt_risk_2_outcome || 0) + (ev.rt_risk_3_outcome || 0) + (ev.rt_risk_4_outcome || 0)} />
                 </BrokerNode>
@@ -1360,28 +1397,41 @@ function PipelineDiagram({ pipeline }) {
                   <div style={colStyle}>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: rGap }}>
                       <div style={{ height: rRowH, display: 'flex', alignItems: 'center', gap: 0 }}>
-                        <div ref={ctRef}><FactoryNode icon="🏛️" label="C&T Risk Management" description="acts on investigate"
-                          width={200}
-                          tooltip="Custom & Tax Risk Management System — subscribes to Assessment Outcome (investigate route only). Opens cases in investigation.db and produces Investigation Outcome events on closure." /></div>
+                        <div ref={ctRef}><FactoryNode icon="🏛️" label="Custom & Tax Risks Management System" description="acts on investigate"
+                          width={240}
+                          tooltip="Custom & Tax Risks Management System — subscribes to Assessment Outcome (investigate route only). Opens cases in investigation.db and produces Investigation Outcome events on closure." /></div>
                         <LongArrow width={60} />
                         <div ref={invOutcomeRef}><BrokerNode label="Investigation Outcome" topicKey="INVESTIGATION_OUTCOME"
                           count={ev.investigation_outcome || 0} sm width={OUT_BROKER_W}
-                          tooltip="INVESTIGATION_OUTCOME — produced by the C&T Risk Management system on case closure. Consumed by the Exit Process Factory." /></div>
+                          tooltip="INVESTIGATION_OUTCOME — produced by the Custom & Tax Risks Management System on case closure. Consumed by the Consolidation Factory." /></div>
                       </div>
                       <div style={{ height: rRowH, display: 'flex', alignItems: 'center', gap: 0 }}>
-                        <div ref={dbStoreRef}><FactoryNode icon="🚪" label="Exit Process Factory" description="emits CUSTOM_OUTCOME" sm
-                          tooltip="Exit Process Factory — subscribes to Assessment Outcome (release + retain routes) and Investigation Outcome. Emits a single terminal CUSTOM_OUTCOME event per completed order." /></div>
+                        <div ref={dbStoreRef}><FactoryNode icon="🚪" label="Consolidation Factory" description="emits events for MS operational system" sm
+                          tooltip="Consolidation Factory — subscribes to Assessment Outcome (release + retain routes) and Investigation Outcome. Emits a single terminal event per completed order on the Events for MS Operational System broker." /></div>
                         {/* Stretchy arrow: flex-grows so Custom Outcome aligns with Investigation Outcome above */}
                         <div style={{ flex: 1, display: 'flex', alignItems: 'center', minWidth: 60 }}>
                           <div style={{ flex: 1, height: 2, background: '#adb5bd' }} />
                           <div style={{ width: 0, height: 0, borderTop: '4px solid transparent', borderBottom: '4px solid transparent', borderLeft: '6px solid #adb5bd', flex: '0 0 auto' }} />
                         </div>
                         <div ref={dbHubRef}>
-                          <BrokerNode label="Custom Outcome" topicKey="CUSTOM_OUTCOME" sm width={OUT_BROKER_W}
+                          <BrokerNode label="Events for MS Operational System" topicKey="CUSTOM_OUTCOME" sm width={OUT_BROKER_W}
                             count={customTotal}
-                            tooltip={`Terminal CUSTOM_OUTCOME broker — ${customTotal} events.`}>
+                            tooltip={`Events for MS Operational System (terminal broker) — ${customTotal} events.`}>
                             <CustomOutcomeBreakdown s={customStatus} />
                           </BrokerNode>
+                        </div>
+                      </div>
+                      {/* Third row — Member State Consuming Systems factory,
+                          aligned under the Events for MS Operational System
+                          broker, sits inside the MS band at the bottom.
+                          marginTop pushes the row into the MS band's Y range. */}
+                      <div style={{ height: rRowH, display: 'flex', alignItems: 'center',
+                                    gap: 0, marginTop: rGap, position: 'relative', zIndex: 1 }}>
+                        <div style={{ flex: 1 }} />
+                        <div ref={msConsumerRef}>
+                          <FactoryNode icon="📦" label="Member State Consuming Systems" sm
+                            width={OUT_BROKER_W}
+                            tooltip="Member State Consuming Systems — downstream operational systems in the Member State (customs clearance, tax assessment, enforcement workflow) that consume the terminal events emitted by the Consolidation Factory." />
                         </div>
                       </div>
                     </div>
@@ -1394,7 +1444,16 @@ function PipelineDiagram({ pipeline }) {
             {overlayPaths && (() => {
               const grey = '#adb5bd'
               const topRunwayY = 4                                        // just inside the top edge
-              const bottomRunwayY = overlayPaths.containerH + 25          // below all content including MS zone
+              // Keep the Sales Order → Consolidation runway INSIDE the EU
+              // systems area — route it just below the Consolidation
+              // Factory (dby is its bottom edge) but ABOVE the MS band
+              // (which starts at OV_H + LGAP + RT_H + LGAP). The small
+              // gap between those two is where the runway runs.
+              const msBandTop = OV_H + LGAP + RT_H + LGAP
+              const bottomRunwayY = Math.min(
+                overlayPaths.dby + 15,
+                msBandTop - 5,
+              )
               // Single exit point: right edge of Entry, vertically centred
               const startX = overlayPaths.ex
               const startY = overlayPaths.ey
@@ -1435,7 +1494,7 @@ function PipelineDiagram({ pipeline }) {
                     })()
                   )}
 
-                  {/* 3. Sales Order Event → DB Store Factory (down from entry, right below all boxes, up into DB Store) */}
+                  {/* 3. Sales Order Event → Consolidation Factory — runway now stays in the EU area above the MS band */}
                   {overlayPaths.dbx > 0 && (
                     <>
                       <polyline
@@ -1445,8 +1504,22 @@ function PipelineDiagram({ pipeline }) {
                                fill={grey} />
                       <text x={(startX + overlayPaths.dbx) / 2} y={bottomRunwayY - 4}
                             textAnchor="middle" fontSize="8" fill={grey} fontWeight="600">
-                        Sales Order Event → Exit Process Factory
+                        Sales Order Event → Consolidation Factory
                       </text>
+                    </>
+                  )}
+
+                  {/* 4. Events for MS Operational System broker → Member State Consuming Systems factory
+                       (straight down — broker and factory share the same column X) */}
+                  {overlayPaths.mscX > 0 && overlayPaths.hubMidBottomY > 0 && (
+                    <>
+                      <line
+                        x1={overlayPaths.hubMidX} y1={overlayPaths.hubMidBottomY}
+                        x2={overlayPaths.mscX}    y2={overlayPaths.mscTopY}
+                        stroke={grey} strokeWidth="1.5" fill="none" />
+                      <polygon
+                        points={`${overlayPaths.mscX - 4},${overlayPaths.mscTopY - 6} ${overlayPaths.mscX + 4},${overlayPaths.mscTopY - 6} ${overlayPaths.mscX},${overlayPaths.mscTopY}`}
+                        fill={grey} />
                     </>
                   )}
                 </svg>
@@ -1466,7 +1539,7 @@ function PipelineDiagram({ pipeline }) {
         <LegendItem color="var(--eu-blue)" bg="var(--eu-blue-light)" label="Event Broker" />
         <LegendItem color="#868e96" bg="#f8f9fa" label="Factory" />
         <LegendItem color="#8fb8de" bg="#f6f9fc" label="Member State Risk Monitors" />
-        <LegendItem color="var(--eu-blue)" bg="var(--eu-blue-light)" label="Custom Outcome (terminal broker)" />
+        <LegendItem color="var(--eu-blue)" bg="var(--eu-blue-light)" label="Events for MS Operational System (terminal broker)" />
         <LegendItem color="var(--text-muted)" bg="#ffffff" label="Processing zone" dashed />
 
         {/* Score badges */}
