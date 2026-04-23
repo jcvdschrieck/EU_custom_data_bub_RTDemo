@@ -102,7 +102,7 @@ _CANON_RATE = {
 # xlsx data) so higher-risk clusters see retain-dominant histories and
 # lower-risk ones see release-dominant ones. Targets chosen so each of
 # slide-1's three recommendation branches fires on at least one live case:
-#   retPct > 75%   → Recommend Retainment
+#   retPct > 75%   → Recommend Control
 #   25%-75%        → Submit for Tax Review
 #   < 25%          → Recommend Release
 #

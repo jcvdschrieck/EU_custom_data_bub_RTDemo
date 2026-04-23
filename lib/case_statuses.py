@@ -14,7 +14,8 @@ NEW                       = "New"
 UNDER_REVIEW_BY_CUSTOMS   = "Under Review by Customs"
 AI_INVESTIGATING          = "AI Investigation in Progress"
 UNDER_REVIEW_BY_TAX       = "Under Review by Tax"
-REQUESTED_INPUT           = "Requested Input by Third Party"
+REVIEWED_BY_TAX           = "Reviewed by Tax"
+REQUESTED_INPUT           = "Requested Input by Deemed Importer"
 CLOSED                    = "Closed"
 
 # ── Convenience set: every legal value ──────────────────────────────────────
@@ -23,6 +24,7 @@ ALL: frozenset[str] = frozenset({
     UNDER_REVIEW_BY_CUSTOMS,
     AI_INVESTIGATING,
     UNDER_REVIEW_BY_TAX,
+    REVIEWED_BY_TAX,
     REQUESTED_INPUT,
     CLOSED,
 })

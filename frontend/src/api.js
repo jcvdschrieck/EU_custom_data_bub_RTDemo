@@ -34,6 +34,11 @@ export const getTransactions = (params) =>
 export const getSuppliers  = () => http.get('/api/catalog/suppliers').then(r => r.data)
 export const getCountries  = () => http.get('/api/catalog/countries').then(r => r.data)
 
+// ── Reference data (risk-engine labels, statuses, etc.) ───────────────────────
+// Same payload consumed by the C&T Risk Management System SPA — single source
+// of truth for display names so both views stay in sync.
+export const getReference  = () => http.get('/api/reference').then(r => r.data)
+
 function clean(obj) {
   if (!obj) return {}
   return Object.fromEntries(Object.entries(obj).filter(([, v]) => v != null && v !== ''))

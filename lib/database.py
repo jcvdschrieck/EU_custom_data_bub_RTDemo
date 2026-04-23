@@ -169,7 +169,7 @@ CREATE TABLE IF NOT EXISTS sales_order_statuses (
 _SEED_SALES_ORDER_STATUSES = [
     ("Under Investigation", "Set at record creation when the C&T factory opens a case", 10),
     ("To Be Released",      "Set by the Customs officer when recommending release",     20),
-    ("To Be Retained",      "Set by the Customs officer when recommending retainment",  30),
+    ("To Be Controlled",    "Set by the Customs officer when recommending control",     30),
 ]
 
 
@@ -182,23 +182,70 @@ CREATE TABLE IF NOT EXISTS case_statuses (
 """
 
 _SEED_CASE_STATUSES = [
-    ("New",                            "Set at case creation by the C&T factory",                       10),
-    ("Under Review by Customs",        "Customs officer has opened / is reviewing the case",            20),
-    ("AI Investigation in Progress",   "VAT Fraud Detection agent is analysing (Tax review requested)", 30),
-    ("Under Review by Tax",            "Tax officer is reviewing after AI analysis completes",          40),
-    ("Requested Input by Third Party", "Awaiting response from an external third party",                50),
-    ("Closed",                         "Terminal — officer recommended release or retainment",          60),
+    ("New",                                "Set at case creation by the C&T factory",                       10),
+    ("Under Review by Customs",            "Customs officer has opened / is reviewing the case",            20),
+    ("AI Investigation in Progress",       "VAT Fraud Detection agent is analysing (Tax review requested)", 30),
+    ("Under Review by Tax",                "Tax officer is reviewing after AI analysis completes",          40),
+    ("Reviewed by Tax",                    "Tax officer has completed review; case back in Customs queue",  45),
+    ("Requested Input by Deemed Importer", "Awaiting response from the Deemed Importer",                    50),
+    ("Closed",                             "Terminal — officer recommended release or control",             60),
+]
+
+
+# ── Customs / Tax action reference tables ───────────────────────────────────
+# Canonical action sets — `code` is the wire identifier sent by clients
+# in POST bodies; `label` is the UI button text. "Control" deliberately
+# replaces "Retainment" everywhere as user-facing terminology. The wire
+# code "retainment" is kept for backwards compat with existing clients.
+
+_CUSTOMS_ACTIONS_DDL = """
+CREATE TABLE IF NOT EXISTS customs_actions (
+    code         TEXT    PRIMARY KEY,
+    label        TEXT    NOT NULL,
+    description  TEXT,
+    sort_order   INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+_SEED_CUSTOMS_ACTIONS = [
+    ("retainment",      "Recommend Control",                  "Close case as retained (goods held for inspection)", 10),
+    ("release",         "Recommend Release",                  "Close case as released (goods cleared)",             20),
+    ("tax_review",      "Submit for Tax Review",              "Escalate to Tax Authority",                          30),
+    ("input_requested", "Request Input from Deemed Importer", "Pause case pending importer response",               40),
+]
+
+
+_TAX_ACTIONS_DDL = """
+CREATE TABLE IF NOT EXISTS tax_actions (
+    code         TEXT    PRIMARY KEY,
+    label        TEXT    NOT NULL,
+    description  TEXT,
+    sort_order   INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+_SEED_TAX_ACTIONS = [
+    ("risk_confirmed",  "Confirm Risk",                       "Tax agrees risk is real; send back to Customs",  10),
+    ("no_limited_risk", "No/Limited Risk",                    "Tax sees no substantive risk; send back",        20),
+    ("input_requested", "Request Input from Deemed Importer", "Pause pending importer response",                30),
 ]
 
 
 _SEED_VAT_CATEGORIES = [
-    ("Educational Material", 9.0,  "Books, learning aids", 10),
-    ("Consumer Electronics", 23.0, "Phones, audio, smart devices", 20),
-    ("Fashion & Apparel",    23.0, "Clothing, footwear, accessories", 30),
-    ("Health & Beauty",      13.5, "Cosmetics, personal care", 40),
-    ("Home & Garden",        23.0, "Appliances, furniture, decor", 50),
-    ("Accessories",          23.0, "Phone/computer accessories", 60),
-    ("Toys & Games",         13.5, "Toys, board games", 70),
+    # Canonical parent categories mirrored from lib/vat_dataset.py —
+    # the same vocabulary the live simulation + risk engines produce.
+    # Single source for the FE Tax-Assessment dropdown. Legacy
+    # Title-Case mock labels have been dropped: they existed only as
+    # offline-demo fallback and were confusing the UI by appearing
+    # alongside the real UPPER-CASE ones.
+    ("FOOD PRODUCTS",                         0.0,  "Food products", 10),
+    ("BOOKS, PUBLICATIONS & DIGITAL CONTENT", 0.0,  "Books, publications, digital content", 20),
+    ("ELECTRONICS & ACCESSORIES",             23.0, "Consumer electronics and accessories", 30),
+    ("CLOTHING & TEXTILES",                   23.0, "Clothing & textiles", 40),
+    ("COSMETICS & PERSONAL CARE",             23.0, "Cosmetics & personal care", 50),
+    ("TOYS",                                  23.0, "Toys", 60),
+    ("FOOD SUPPLEMENTS & VITAMINS",           23.0, "Food supplements & vitamins", 70),
+    ("SPORTS & LEISURE / DIGITAL SERVICES",   23.0, "Sports / leisure / digital services", 80),
 ]
 
 _SEED_RISK_LEVELS = [
@@ -285,6 +332,7 @@ CREATE TABLE IF NOT EXISTS Sales_Order (
     Sales_Order_ID              TEXT NOT NULL,
     Sales_Order_Business_Key    TEXT PRIMARY KEY,
     HS_Product_Category         TEXT,
+    VAT_Subcategory_Code        TEXT,
     Product_Description         TEXT,
     Product_Value               REAL,
     VAT_Rate                    REAL,
@@ -373,12 +421,22 @@ CREATE TABLE IF NOT EXISTS risk_engine_signals (
     display_name  TEXT NOT NULL,
     description   TEXT
 );
-INSERT OR IGNORE INTO risk_engine_signals VALUES
-    ('Engine_VAT_Ratio',             'vat_ratio',              'VAT Ratio Deviation',        'Statistical deviation in VAT/value ratio vs 8-week baseline'),
-    ('Engine_ML_Watchlist',          'watchlist',              'VAT Misclassification Risk',  'ML-based watchlist matching on seller × origin × category × destination'),
-    ('Engine_IE_Seller_Watchlist',   'ireland_watchlist',      'Seller Risk',                 'Ireland-specific seller watchlist for IE-destined goods'),
-    ('Engine_Description_Vagueness', 'description_vagueness',  'Description Vagueness',       'NLP-based detection of vague or generic product descriptions');
 """
+
+# Canonical risk-engine labels — single source of truth for both the
+# pipeline view (Simulation Page) and the case view (C&T Risk Management
+# System). Names mirror the four engines inside the Near Real-Time Risk
+# Signals zone of the pipeline diagram.
+_SEED_RISK_ENGINE_SIGNALS = [
+    ("Engine_VAT_Ratio",             "vat_ratio",              "Product Category - VAT Rate Consistency",
+     "Compares declared VAT rate against the expected rate for the declared product subcategory in the destination country."),
+    ("Engine_ML_Watchlist",          "watchlist",              "VAT Product Category Misclassification",
+     "Supplier-risk ML model trained on past transaction analyses — matches on seller × origin × category × destination."),
+    ("Engine_IE_Seller_Watchlist",   "ireland_watchlist",      "IE Seller Risk",
+     "Ireland-specific seller watchlist managed by the Irish customs authority; only applies to IE-destined goods."),
+    ("Engine_Description_Vagueness", "description_vagueness",  "Vague Description",
+     "Embedding-model analysis of the product description — high score means ambiguous or generic wording."),
+]
 
 
 
@@ -431,6 +489,22 @@ def _migrate_european_custom_db(conn: sqlite3.Connection) -> None:
             s = stmt.strip()
             if s:
                 conn.execute(s)
+    # Sales_Order: VAT_Subcategory_Code column added after initial schema.
+    # Applied to european_custom.db here; investigation.db + historical
+    # handled by _migrate_investigation_db below.
+    try:
+        conn.execute("ALTER TABLE Sales_Order ADD COLUMN VAT_Subcategory_Code TEXT")
+    except sqlite3.OperationalError:
+        pass  # already exists or table not created yet
+
+
+def _migrate_investigation_db(conn: sqlite3.Connection) -> None:
+    """Add columns introduced after initial schema to investigation.db /
+    historical_cases.db (both share _SALES_ORDER_DDL)."""
+    try:
+        conn.execute("ALTER TABLE Sales_Order ADD COLUMN VAT_Subcategory_Code TEXT")
+    except sqlite3.OperationalError:
+        pass
 
 
 def _migrate_simulation_db(conn: sqlite3.Connection) -> None:
@@ -492,6 +566,8 @@ def init_european_custom_db() -> None:
     _init_ddl(EUROPEAN_CUSTOM_DB, _ML_RISK_RULES_DDL)
     _init_ddl(EUROPEAN_CUSTOM_DB, _SALES_ORDER_STATUSES_DDL)
     _init_ddl(EUROPEAN_CUSTOM_DB, _CASE_STATUSES_DDL)
+    _init_ddl(EUROPEAN_CUSTOM_DB, _CUSTOMS_ACTIONS_DDL)
+    _init_ddl(EUROPEAN_CUSTOM_DB, _TAX_ACTIONS_DDL)
     _seed_reference_tables()
     _seed_ml_risk_rules_from_xlsx()
 
@@ -503,6 +579,14 @@ def init_historical_cases_db() -> None:
     _init_ddl(HISTORICAL_CASES_DB, _SALES_ORDER_DDL)
     _init_ddl(HISTORICAL_CASES_DB, _SALES_ORDER_RISK_DDL)
     _init_ddl(HISTORICAL_CASES_DB, _SALES_ORDER_CASE_DDL)
+    # Migrate older DBs: Sales_Order gained VAT_Subcategory_Code later.
+    conn = _connect(HISTORICAL_CASES_DB)
+    with conn:
+        try:
+            conn.execute("ALTER TABLE Sales_Order ADD COLUMN VAT_Subcategory_Code TEXT")
+        except sqlite3.OperationalError:
+            pass
+    conn.close()
 
 
 def init_investigation_db() -> None:
@@ -525,12 +609,21 @@ def init_investigation_db() -> None:
             ("Sales_Order_Case", "Engine_IE_Seller_Watchlist", "REAL DEFAULT 0"),
             ("Sales_Order_Case", "Engine_Description_Vagueness", "REAL DEFAULT 0"),
             ("Sales_Order_Case", "AI_Legislation_Refs",         "TEXT"),
+            ("Sales_Order",      "VAT_Subcategory_Code",        "TEXT"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {definition}")
             except sqlite3.OperationalError:
                 pass
         conn.execute("UPDATE Sales_Order_Case SET Created_time = Update_time WHERE Created_time IS NULL")
+        # Reseed risk_engine_signals on every startup so label renames
+        # propagate without a separate migration.
+        conn.execute("DELETE FROM risk_engine_signals")
+        conn.executemany(
+            "INSERT INTO risk_engine_signals "
+            "(field_name, engine_key, display_name, description) VALUES (?, ?, ?, ?)",
+            _SEED_RISK_ENGINE_SIGNALS,
+        )
     conn.close()
 
 
@@ -563,13 +656,15 @@ def upsert_sales_order(row: dict) -> None:
         conn.execute("""
             INSERT OR REPLACE INTO Sales_Order (
                 Sales_Order_ID, Sales_Order_Business_Key,
-                HS_Product_Category, Product_Description, Product_Value,
+                HS_Product_Category, VAT_Subcategory_Code,
+                Product_Description, Product_Value,
                 VAT_Rate, VAT_Fee, Seller_Name,
                 Country_Origin, Country_Destination,
                 Status, Update_time, Updated_by
             ) VALUES (
                 :Sales_Order_ID, :Sales_Order_Business_Key,
-                :HS_Product_Category, :Product_Description, :Product_Value,
+                :HS_Product_Category, :VAT_Subcategory_Code,
+                :Product_Description, :Product_Value,
                 :VAT_Rate, :VAT_Fee, :Seller_Name,
                 :Country_Origin, :Country_Destination,
                 :Status, :Update_time, :Updated_by
@@ -1253,12 +1348,23 @@ def update_case(case_id: str, updates: dict) -> bool:
 # ── Reference table seed + getters ──────────────────────────────────────────
 
 def _seed_reference_tables() -> None:
-    """Idempotent seed of the four lookup tables. INSERT OR IGNORE keyed on
-    the natural unique column so re-runs don't duplicate rows."""
+    """Idempotent seed of every lookup table. Status/action tables use
+    DELETE + INSERT so canonical-vocabulary renames (e.g. "Third Party"
+    → "Deemed Importer", "Retainment" → "Control") take effect on every
+    restart without a separate migration. The other tables keep INSERT
+    OR IGNORE semantics to preserve operator-added rows.
+
+    Historical rows in Sales_Order_Case / Sales_Order that still carry
+    the old status strings are patched in-place below.
+    """
     conn = _connect(EUROPEAN_CUSTOM_DB)
     with conn:
+        # DELETE + INSERT so vocabulary changes (e.g. removing legacy
+        # Title-Case entries that used to coexist with the canonical
+        # UPPERCASE ones) take effect on every restart.
+        conn.execute("DELETE FROM vat_categories")
         conn.executemany(
-            "INSERT OR IGNORE INTO vat_categories (label, rate, description, sort_order) VALUES (?, ?, ?, ?)",
+            "INSERT INTO vat_categories (label, rate, description, sort_order) VALUES (?, ?, ?, ?)",
             _SEED_VAT_CATEGORIES,
         )
         conn.executemany(
@@ -1273,14 +1379,42 @@ def _seed_reference_tables() -> None:
             "INSERT OR IGNORE INTO suspicion_types (name, description, icon, color, sort_order) VALUES (?, ?, ?, ?, ?)",
             _SEED_SUSPICION_TYPES,
         )
+        # Status + action tables: fully reseeded so label renames win.
+        conn.execute("DELETE FROM sales_order_statuses")
         conn.executemany(
-            "INSERT OR IGNORE INTO sales_order_statuses (name, description, sort_order) VALUES (?, ?, ?)",
+            "INSERT INTO sales_order_statuses (name, description, sort_order) VALUES (?, ?, ?)",
             _SEED_SALES_ORDER_STATUSES,
         )
+        conn.execute("DELETE FROM case_statuses")
         conn.executemany(
-            "INSERT OR IGNORE INTO case_statuses (name, description, sort_order) VALUES (?, ?, ?)",
+            "INSERT INTO case_statuses (name, description, sort_order) VALUES (?, ?, ?)",
             _SEED_CASE_STATUSES,
         )
+        conn.execute("DELETE FROM customs_actions")
+        conn.executemany(
+            "INSERT INTO customs_actions (code, label, description, sort_order) VALUES (?, ?, ?, ?)",
+            _SEED_CUSTOMS_ACTIONS,
+        )
+        conn.execute("DELETE FROM tax_actions")
+        conn.executemany(
+            "INSERT INTO tax_actions (code, label, description, sort_order) VALUES (?, ?, ?, ?)",
+            _SEED_TAX_ACTIONS,
+        )
+        # Migrate any persisted rows that still carry the old labels.
+        try:
+            conn.execute(
+                "UPDATE Sales_Order_Case SET Status='Requested Input by Deemed Importer' "
+                "WHERE Status='Requested Input by Third Party'"
+            )
+        except sqlite3.OperationalError:
+            pass  # Table not yet created (first run)
+        try:
+            conn.execute(
+                "UPDATE Sales_Order SET Sales_Order_Status='To Be Controlled' "
+                "WHERE Sales_Order_Status='To Be Retained'"
+            )
+        except sqlite3.OperationalError:
+            pass
     conn.close()
 
 
@@ -1402,6 +1536,24 @@ def get_sales_order_statuses() -> list[dict]:
     conn = _connect(EUROPEAN_CUSTOM_DB)
     rows = conn.execute(
         "SELECT name, description FROM sales_order_statuses ORDER BY sort_order, name"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_customs_actions() -> list[dict]:
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    rows = conn.execute(
+        "SELECT code, label, description FROM customs_actions ORDER BY sort_order, code"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_tax_actions() -> list[dict]:
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    rows = conn.execute(
+        "SELECT code, label, description FROM tax_actions ORDER BY sort_order, code"
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -1555,13 +1707,15 @@ def append_order_to_case(case_id: str, so_row: dict, sor_row: dict) -> None:
             conn.execute("""
                 INSERT OR REPLACE INTO Sales_Order (
                     Sales_Order_ID, Sales_Order_Business_Key,
-                    HS_Product_Category, Product_Description, Product_Value,
+                    HS_Product_Category, VAT_Subcategory_Code,
+                    Product_Description, Product_Value,
                     VAT_Rate, VAT_Fee, Seller_Name,
                     Country_Origin, Country_Destination,
                     Status, Update_time, Updated_by, Case_ID
                 ) VALUES (
                     :Sales_Order_ID, :Sales_Order_Business_Key,
-                    :HS_Product_Category, :Product_Description, :Product_Value,
+                    :HS_Product_Category, :VAT_Subcategory_Code,
+                    :Product_Description, :Product_Value,
                     :VAT_Rate, :VAT_Fee, :Seller_Name,
                     :Country_Origin, :Country_Destination,
                     :Status, :Update_time, :Updated_by, :Case_ID
@@ -1614,9 +1768,18 @@ def update_case_engine_scores(case_id: str, engine_scores: dict,
 
 
 def get_risk_engine_signals() -> list[dict]:
-    """Return the reference table mapping field names to display names."""
+    """Return the reference table mapping field names to display names.
+
+    Returned keys match the FE `RiskSignal` interface (key/label/description),
+    so both the pipeline view and the case view can drive their UI off the
+    same source of truth.
+    """
     conn = _connect(INVESTIGATION_DB)
-    rows = conn.execute("SELECT * FROM risk_engine_signals").fetchall()
+    rows = conn.execute(
+        "SELECT engine_key AS key, display_name AS label, "
+        "       description, field_name "
+        "FROM risk_engine_signals"
+    ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -1704,13 +1867,15 @@ def upsert_investigation_set(so_row: dict, sor_row: dict, soc_row: dict) -> None
             conn.execute("""
                 INSERT OR REPLACE INTO Sales_Order (
                     Sales_Order_ID, Sales_Order_Business_Key,
-                    HS_Product_Category, Product_Description, Product_Value,
+                    HS_Product_Category, VAT_Subcategory_Code,
+                    Product_Description, Product_Value,
                     VAT_Rate, VAT_Fee, Seller_Name,
                     Country_Origin, Country_Destination,
                     Status, Update_time, Updated_by, Case_ID
                 ) VALUES (
                     :Sales_Order_ID, :Sales_Order_Business_Key,
-                    :HS_Product_Category, :Product_Description, :Product_Value,
+                    :HS_Product_Category, :VAT_Subcategory_Code,
+                    :Product_Description, :Product_Value,
                     :VAT_Rate, :VAT_Fee, :Seller_Name,
                     :Country_Origin, :Country_Destination,
                     :Status, :Update_time, :Updated_by, :Case_ID
@@ -1833,7 +1998,8 @@ def _hydrate_with_orders(r, conn) -> dict:
     if case_id:
         orders = conn.execute("""
             SELECT o.Sales_Order_ID, o.Sales_Order_Business_Key,
-                   o.HS_Product_Category, o.Product_Description, o.Product_Value,
+                   o.HS_Product_Category, o.VAT_Subcategory_Code,
+                   o.Product_Description, o.Product_Value,
                    o.VAT_Rate, o.VAT_Fee, o.Seller_Name,
                    o.Country_Origin, o.Country_Destination,
                    r.Overall_Risk_Score, r.Overall_Risk_Level
@@ -1958,7 +2124,7 @@ def _compute_customs_recommendation(case: dict) -> tuple[str, str]:
                 "retaining nor releasing is reliable — the recommendation "
                 "is to ask a third party for clarification before taking "
                 "a decision.")
-        return ("Request Input from Third Party",
+        return ("Request Input from Deemed Importer",
                 base + _confirming_signals_text(case, retain_leaning=True))
 
     prev = get_previous_cases(seller=seller, category=category,
@@ -1982,7 +2148,7 @@ def _compute_customs_recommendation(case: dict) -> tuple[str, str]:
                 f"in retention ({retPct*100:.0f}%). The historical pattern "
                 "strongly points to retainment — the goods should be held "
                 "for further inspection.")
-        return ("Recommend Retainment",
+        return ("Recommend Control",
                 base + _confirming_signals_text(case, retain_leaning=True))
     if retPct < 0.25:
         base = (f"Only {retained} of the {total} past closed cases for "
@@ -2072,7 +2238,7 @@ def _compute_tax_recommendation(case: dict) -> tuple[str, str]:
                 f"seller \"{seller}\" on {category} going to {destination} "
                 "to reinforce or contradict the finding. Third-party input "
                 "is recommended before concluding.")
-        return ("Request Input from Third Party",
+        return ("Request Input from Deemed Importer",
                 base + _confirming_signals_text(case, retain_leaning=True))
     base = (f"A VAT gap of €{abs_gap:.2f} has been calculated on this "
             f"case, but only {retained} of the {total} past closed cases "
@@ -2080,7 +2246,7 @@ def _compute_tax_recommendation(case: dict) -> tuple[str, str]:
             f"ended in retention ({retPct*100:.0f}%). The historical "
             "pattern is not strong enough on its own — third-party input "
             "is recommended before concluding.")
-    return ("Request Input from Third Party",
+    return ("Request Input from Deemed Importer",
             base + _confirming_signals_text(case, retain_leaning=True))
 
 

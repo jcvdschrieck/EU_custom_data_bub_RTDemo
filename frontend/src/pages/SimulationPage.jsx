@@ -2,7 +2,23 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   getSimStatus, getPipelineStats, openSimStateStream,
   simStart, simPause, simResume, simReset, simSetSpeed,
+  getReference,
 } from '../api'
+
+// Risk-signal display names — canonical source is the backend
+// risk_engine_signals table (fetched via /api/reference at mount).
+// Fallback hardcoded labels kept in sync with the backend seed so the
+// UI renders identically before the reference fetch lands.
+const SIGNAL_LABEL_FALLBACK = {
+  vat_ratio:             'Product Category - VAT Rate Consistency',
+  watchlist:             'VAT Product Category Misclassification',
+  ireland_watchlist:     'IE Seller Risk',
+  description_vagueness: 'Vague Description',
+}
+function makeSignalLabel(signals) {
+  const byKey = new Map((signals || []).map(s => [s.key, s.label]))
+  return (key) => byKey.get(key) ?? SIGNAL_LABEL_FALLBACK[key] ?? key
+}
 
 // User-facing speed multipliers. The simulation DB is rescaled at seed time
 // so all transactions fall within a 15-sim-minute window (March 1st 00:00 →
@@ -226,7 +242,6 @@ function FactoryNode({ label, description, icon, accent, sm, tooltip, width, cou
       }}>
       <div style={{ fontSize: sm ? 13 : 15, marginBottom: 2 }}>{icon}</div>
       <div style={{ fontSize: sm ? 9 : 10, fontWeight: 700, color: 'var(--text-primary)', lineHeight: 1.3 }}>{label}</div>
-      {description && <div style={{ fontSize: 8, color: 'var(--text-muted)', marginTop: 1 }}>{description}</div>}
       {count != null && (
         <div style={{ marginTop: 4 }}>
           <div style={{
@@ -405,16 +420,29 @@ function ScoreBadges({ green, amber, red }) {
   if (green == null && amber == null && red == null) return null
   return (
     <div style={{ marginTop: 5, display: 'flex', justifyContent: 'center', gap: 3, flexWrap: 'wrap' }}>
-      <span style={{ background: '#d4edda', color: '#155724', border: '1px solid #c3e6cb', padding: '1px 5px', borderRadius: 8, fontSize: 9, fontWeight: 700 }}>● {fmt(green)}</span>
-      <span style={{ background: '#fde8e8', color: '#c0392b', border: '1px solid #f5c6cb', padding: '1px 5px', borderRadius: 8, fontSize: 9, fontWeight: 700 }}>● {fmt(red)}</span>
-      <span style={{ background: '#fff3cd', color: '#856404', border: '1px solid #ffc107', padding: '1px 5px', borderRadius: 8, fontSize: 9, fontWeight: 700 }}>● {fmt(amber)}</span>
+      <span style={{ background: '#d4edda', color: '#155724', border: '1px solid #c3e6cb', padding: '1px 5px', borderRadius: 8, fontSize: 9, fontWeight: 700 }}>{fmt(green)}</span>
+      <span style={{ background: '#fde8e8', color: '#c0392b', border: '1px solid #f5c6cb', padding: '1px 5px', borderRadius: 8, fontSize: 9, fontWeight: 700 }}>{fmt(red)}</span>
+      <span style={{ background: '#fff3cd', color: '#856404', border: '1px solid #ffc107', padding: '1px 5px', borderRadius: 8, fontSize: 9, fontWeight: 700 }}>{fmt(amber)}</span>
+    </div>
+  )
+}
+
+// Simplified two-badge variant used by the "Consolidated events for MS
+// operational system(s)" terminal broker — green = released (automated
+// + custom), red = retained (automated + custom), both aggregated from
+// the Final Consolidation output.
+function ReleaseRetainBadges({ release, retain }) {
+  return (
+    <div style={{ marginTop: 5, display: 'flex', justifyContent: 'center', gap: 3, flexWrap: 'wrap' }}>
+      <span style={{ background: '#d4edda', color: '#155724', border: '1px solid #c3e6cb', padding: '1px 5px', borderRadius: 8, fontSize: 9, fontWeight: 700 }}>{fmt(release)}</span>
+      <span style={{ background: '#fde8e8', color: '#c0392b', border: '1px solid #f5c6cb', padding: '1px 5px', borderRadius: 8, fontSize: 9, fontWeight: 700 }}>{fmt(retain)}</span>
     </div>
   )
 }
 
 // ── SVG fan-out / fan-in connectors ──────────────────────────────────────────
 
-function FanOutSVG({ height, targetYs, color = '#adb5bd', width = 48, dashed = false }) {
+function FanOutSVG({ height, targetYs, color = '#adb5bd', width = 48, dashed = false, targetEndXs }) {
   if (!targetYs || !targetYs.length) return null
   const spineX = 8
   const y0 = targetYs[0], y1 = targetYs[targetYs.length - 1]
@@ -422,13 +450,18 @@ function FanOutSVG({ height, targetYs, color = '#adb5bd', width = 48, dashed = f
   return (
     <svg width={width} height={height} style={{ flex: `0 0 ${width}px`, overflow: 'visible' }}>
       <line x1={spineX} y1={y0} x2={spineX} y2={y1} stroke={color} strokeWidth={2} strokeDasharray={dash} />
-      {targetYs.map((yc, i) => (
-        <g key={i}>
-          <circle cx={spineX} cy={yc} r={3} fill={color} />
-          <line x1={spineX} y1={yc} x2={width - 6} y2={yc} stroke={color} strokeWidth={2} strokeDasharray={dash} />
-          <polygon points={`${width-6},${yc-4} ${width},${yc} ${width-6},${yc+4}`} fill={color} />
-        </g>
-      ))}
+      {targetYs.map((yc, i) => {
+        // Per-target end X — caller can push an individual arrow
+        // further right (e.g. when its destination has been shifted
+        // away from the column edge). Falls back to the default.
+        const endX = targetEndXs?.[i] ?? (width - 6)
+        return (
+          <g key={i}>
+            <line x1={spineX} y1={yc} x2={endX} y2={yc} stroke={color} strokeWidth={2} strokeDasharray={dash} />
+            <polygon points={`${endX},${yc-4} ${endX+6},${yc} ${endX},${yc+4}`} fill={color} />
+          </g>
+        )
+      })}
     </svg>
   )
 }
@@ -458,7 +491,6 @@ function FanOutMixedSVG({ height, targets, width = 56 }) {
         const dash = t.dashed ? '4,3' : undefined
         return (
           <g key={i}>
-            <circle cx={spineX} cy={t.y} r={3} fill={grey} />
             <line x1={spineX} y1={t.y} x2={width - 6} y2={t.y}
               stroke={grey} strokeWidth={2} strokeDasharray={dash} />
             <polygon points={`${width-6},${t.y-4} ${width},${t.y} ${width-6},${t.y+4}`} fill={grey} />
@@ -498,7 +530,6 @@ function FanInSVG({ height, inputYs, outputY, color = '#adb5bd', width = 48 }) {
       {inputYs.map((yc, i) => (
         <g key={i}>
           <line x1={0} y1={yc} x2={spineX} y2={yc} stroke={color} strokeWidth={2} />
-          <circle cx={spineX} cy={yc} r={3} fill={color} />
         </g>
       ))}
       <polygon points={`${spineX},${outputY-4} ${width},${outputY} ${spineX},${outputY+4}`} fill={color} />
@@ -985,13 +1016,13 @@ function KpiStrip({ pipeline }) {
   const tiles = [
     { key: 'ingested',     label: 'Ingested',           value: ingested,          color: 'var(--eu-blue)',
       tooltip: 'Sales-order events fired by the simulation engine (entry to the pipeline).' },
-    { key: 'released',     label: 'To be released',     value: released,          color: '#1f7a3c',
+    { key: 'released',     label: 'Recommend Release',  value: released,          color: '#1f7a3c',
       tooltip: 'Sales Order Release + Release Post Inv. — total transactions cleared for release (both automated and post-investigation).' },
-    { key: 'retained',     label: 'To be retained',     value: retained,          color: '#c0392b',
+    { key: 'retained',     label: 'Recommend Control',  value: retained,          color: '#c0392b',
       tooltip: 'Sales Order Retained + Retain Post Inv. — total transactions flagged as suspicious and retained (both automated and post-investigation).' },
-    { key: 'underInv',     label: 'Under Investigation', value: underInvestigation, color: '#e6820a',
+    { key: 'underInv',     label: 'To be investigated', value: underInvestigation, color: '#e6820a',
       tooltip: 'Transactions currently in the Tax queue — waiting for the Tax officer to act or being analysed by the VAT Fraud Detection Agent.' },
-    { key: 'investigated', label: 'Investigated',       value: investigated,      color: '#9c27b0',
+    { key: 'investigated', label: 'Investigated',       value: investigated,      color: '#003399',
       tooltip: 'Investigations the VAT Fraud Detection Agent has completed (produced a verdict: correct, uncertain, or incorrect).' },
   ]
 
@@ -1023,7 +1054,8 @@ function KpiStrip({ pipeline }) {
 
 // ── Pipeline Diagram ──────────────────────────────────────────────────────────
 
-function PipelineDiagram({ pipeline }) {
+function PipelineDiagram({ pipeline, status, riskSignals }) {
+  const signalLabel = makeSignalLabel(riskSignals)
   const pipelineRef = useRef(null)
   const entryRef = useRef(null)
   const ctRef = useRef(null)
@@ -1031,6 +1063,10 @@ function PipelineDiagram({ pipeline }) {
   const invOutcomeRef = useRef(null)
   const dbHubRef = useRef(null)
   const msConsumerRef = useRef(null)
+  const ieWatchlistRef = useRef(null)
+  const rtRiskBrokerRef = useRef(null)
+  const fanOutRef = useRef(null)
+  const rightFanOutRef = useRef(null)
   const containerRef = useRef(null)
   const [overlayPaths, setOverlayPaths] = useState(null)
 
@@ -1085,10 +1121,54 @@ function PipelineDiagram({ pipeline }) {
         mscX = mscRect.left + mscRect.width / 2 - cRect.left
         mscTopY = mscRect.top - cRect.top
       }
+      // IE Seller Watchlist — left + right + center Y so the Entry→IE
+      // and IE→Near-RT-Risk-Signals dashed arrows can anchor on the
+      // factory's actual edges.
+      let ieLeftX = 0, ieRightX = 0, ieMidY = 0
+      const ieEl = ieWatchlistRef.current
+      if (ieEl) {
+        const ieRect = ieEl.getBoundingClientRect()
+        ieLeftX = ieRect.left - cRect.left
+        ieRightX = ieRect.right - cRect.left
+        ieMidY = ieRect.top + ieRect.height / 2 - cRect.top
+      }
+      // Near Real-time Risk Signals broker — left edge + center Y, for
+      // the IE Seller → Near-RT dashed arrow to target.
+      let rtBrokerLeftX = 0, rtBrokerMidY = 0
+      const rtBrokerEl = rtRiskBrokerRef.current
+      if (rtBrokerEl) {
+        const rtRect = rtBrokerEl.getBoundingClientRect()
+        rtBrokerLeftX = rtRect.left - cRect.left
+        rtBrokerMidY = rtRect.top + rtRect.height / 2 - cRect.top
+      }
+      // Fan-out spine X — shared vertical axis for all arrows leaving
+      // the Entry node. FanOutMixedSVG draws its spine at spineX=8
+      // inside the SVG, so trunk X = fanOut left + 8.
+      let entryTrunkX = 0
+      const fanOutEl = fanOutRef.current
+      if (fanOutEl) {
+        const foRect = fanOutEl.getBoundingClientRect()
+        entryTrunkX = foRect.left - cRect.left + 8
+      }
+      // Right-side fan-out (Assessment Outcome → C&T + Final
+      // Consolidation). Final Consolidation was shifted right inside
+      // row 2, so its arrow needs to extend beyond the fan-out SVG's
+      // default end. Compute the target end-X in the fan-out's local
+      // coord system: dbStore.left relative to the fan-out's left.
+      let rightFanBotEndX = 0
+      const rightFanEl = rightFanOutRef.current
+      if (rightFanEl && dbStore) {
+        const rfRect = rightFanEl.getBoundingClientRect()
+        const dbRect2 = dbStore.getBoundingClientRect()
+        rightFanBotEndX = dbRect2.left - rfRect.left
+      }
       const containerH = cRect.height
       setOverlayPaths({ ex, ey, ctx, cty, dbx, dby, dbTop, ix, iy, iLeft, iBottom,
                         ctBottom, hubRight, hubBottom,
-                        hubMidX, hubMidBottomY, mscX, mscTopY, containerH })
+                        hubMidX, hubMidBottomY, mscX, mscTopY,
+                        ieLeftX, ieRightX, ieMidY,
+                        rtBrokerLeftX, rtBrokerMidY, entryTrunkX,
+                        rightFanBotEndX, containerH })
     }
     update()
     const id = setInterval(update, 2000)
@@ -1125,11 +1205,17 @@ function PipelineDiagram({ pipeline }) {
                      + (customStatus.custom_retain     || 0)
 
   // Row 1: three processing zones stacked (OV + RT + MS)
-  const OV_H = 94, RT_H = 310, MS_H = 110, LGAP = 10
-  const ROW1_H = OV_H + LGAP + RT_H + LGAP + MS_H
+  // RT zone is shortened (310 → 270) and a larger gap (RT_MS_GAP = 50)
+  // is inserted between RT and the Member State band so the Sales Order
+  // → Consolidation Factory runway can route through EU territory
+  // without crossing the Real-Time Risk Assessment box.
+  const OV_H = 94, RT_H = 270, MS_H = 110, LGAP = 10, RT_MS_GAP = 50
+  const ROW1_H = OV_H + LGAP + RT_H + RT_MS_GAP + MS_H
   const yOV = OV_H / 2
   const yRT = OV_H + LGAP + RT_H / 2
-  const yMS = OV_H + LGAP + RT_H + LGAP + MS_H / 2
+  const yMS = OV_H + LGAP + RT_H + RT_MS_GAP + MS_H / 2
+  const rtBottom  = OV_H + LGAP + RT_H          // y where RT zone ends
+  const msBandTop = rtBottom + RT_MS_GAP        // y where MS band starts
 
   // Zone width wraps the widest factory + fan-out + padding
   const ZONE_W = 280
@@ -1211,39 +1297,65 @@ function PipelineDiagram({ pipeline }) {
                 above). pointerEvents:none so it doesn't intercept clicks. */}
             <div style={{
               position: 'absolute',
-              top: OV_H + LGAP + RT_H + LGAP,
+              top: msBandTop,
               left: 0, right: 0, height: MS_H,
               border: '1px dashed #8fb8de',
               borderRadius: 6,
               background: '#f6f9fc',
               zIndex: 0,
               pointerEvents: 'none',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
             }}>
               <div style={{
                 fontSize: 10, fontWeight: 700, color: '#8fb8de',
                 textTransform: 'uppercase', letterSpacing: '0.08em',
-                textAlign: 'center', marginTop: 4,
-              }}>Member State Systems</div>
+                textAlign: 'center',
+                position: 'relative', zIndex: 3,
+              }}>Member State Application Landscape</div>
             </div>
+            {/* "Connector" overlay — plain blue band sitting ABOVE the
+                Member State Application Landscape area with only a
+                small overlap at the very top of the band (so the band
+                title stays fully visible). Same width as the band. */}
+            <div style={{
+              position: 'absolute',
+              top: msBandTop - 26,
+              left: 0, right: 0, height: 30,
+              background: 'var(--eu-blue)',
+              color: '#fff',
+              borderRadius: 6,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 12, fontWeight: 700,
+              textTransform: 'uppercase', letterSpacing: '0.1em',
+              zIndex: 2,
+              pointerEvents: 'none',
+            }}>Connector</div>
 
             {/* Entry Broker — anchored at yRT so it aligns horizontally with
                 RT Risk Outcome and Automated Assessment Factory. */}
             <div style={{ height: ROW1_H, paddingTop: Math.max(0, yRT - 55), boxSizing: 'border-box' }}>
               <Zone label="Entry">
                 <div ref={entryRef}>
-                  <BrokerNode label="Sales-order Event" topicKey="SALES_ORDER"
+                  <BrokerNode label="Sales Order" topicKey="SALES_ORDER"
                     count={ev.sales_order_event} queueSize={q.sales_order_event} sm />
                 </div>
               </Zone>
             </div>
 
-            {/* FanOut: Entry → Sales Order Validation + RT Risk Assessment + MS Risk Monitors */}
-            <FanOutMixedSVG height={ROW1_H} width={48}
-              targets={[
-                { y: yOV, dashed: false },
-                { y: yRT, dashed: false },
-                { y: yMS, dashed: true },
-              ]} />
+            {/* FanOut: Entry → Sales Order Validation + RT Risk Assessment.
+                The Entry → IE Seller Watchlist branch used to be a third
+                target here; it's now drawn in the SVG overlay below so
+                it can terminate on the factory's actual left edge rather
+                than the zone boundary. The ref lets overlay arrows snap
+                to this spine so every Entry-origin arrow shares the same
+                vertical trunk. */}
+            <div ref={fanOutRef} style={{ flex: '0 0 48px', display: 'flex' }}>
+              <FanOutMixedSVG height={ROW1_H} width={48}
+                targets={[
+                  { y: yOV, dashed: false },
+                  { y: yRT, dashed: false },
+                ]} />
+            </div>
 
             {/* Three parallel zones stacked — all at ZONE_W so Row 1 is visually aligned */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
@@ -1259,7 +1371,7 @@ function PipelineDiagram({ pipeline }) {
               </div>
 
               <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
-                <Zone label="Real-Time Risk Assessment" style={{ width: ZONE_W, height: '100%', boxSizing: 'border-box' }}>
+                <Zone label="Near Real-Time Risk Signals Engine" style={{ width: ZONE_W, height: '100%', boxSizing: 'border-box' }}>
                   {/* The inner content was visually biased toward the bottom of
                       the zone (large gap above the boxes, small gap below). A
                       small upward translate balances the gap on either side
@@ -1271,18 +1383,18 @@ function PipelineDiagram({ pipeline }) {
                     {/* Stacked RT1 + RT2 + RT4 engine factories with arrows */}
                     <div style={{ display: 'flex', flexDirection: 'column', gap: RT_ROW_GAP }}>
                       <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center', gap: 4 }}>
-                        <FactoryNode icon="⚖️" label="VAT Rate Mismatch" sm width={RT_FACTORY_W}
-                          tooltip="VAT Rate Mismatch — compares the declared VAT rate on each order against the rate the EU expects for the declared product subcategory in the destination country. Graded risk (0–1) reflecting how severe the misclassification is." />
+                        <FactoryNode icon="🔍" label={signalLabel("watchlist")} sm width={RT_FACTORY_W}
+                          tooltip={`${signalLabel("watchlist")} — a supplier-risk ML model trained on past transaction analyses. Produces a continuous risk score (0–1) and the per-dimension contributors (seller, origin, category, destination) that led to it.`} />
                         <Arrow />
                       </div>
                       <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center', gap: 4 }}>
-                        <FactoryNode icon="🔍" label="Supplier Risk" sm width={RT_FACTORY_W}
-                          tooltip="Supplier Risk — a supplier-risk ML model trained on past transaction analyses. Produces a continuous risk score (0–1) and the per-dimension contributors (seller, origin, category, destination) that led to it." />
+                        <FactoryNode icon="📝" label={signalLabel("description_vagueness")} sm width={RT_FACTORY_W}
+                          tooltip={`${signalLabel("description_vagueness")} — scores how vague or generic the product description is (0 = specific, 1 = vague). Uses sentence embeddings (all-MiniLM-L6-v2) and cosine similarity to a vague-text anchor.`} />
                         <Arrow />
                       </div>
                       <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center', gap: 4 }}>
-                        <FactoryNode icon="📝" label="Vagueness Detector" sm width={RT_FACTORY_W}
-                          tooltip="Vagueness Detector — scores how vague or generic the product description is (0 = specific, 1 = vague). Uses sentence embeddings (all-MiniLM-L6-v2) and cosine similarity to a vague-text anchor." />
+                        <FactoryNode icon="⚖️" label={signalLabel("vat_ratio")} sm width={RT_FACTORY_W}
+                          tooltip={`${signalLabel("vat_ratio")} — compares the declared VAT rate on each order against the rate the EU expects for the declared product subcategory in the destination country. Graded risk (0–1) reflecting how severe the misclassification is.`} />
                         <Arrow />
                       </div>
                     </div>
@@ -1290,23 +1402,26 @@ function PipelineDiagram({ pipeline }) {
                 </Zone>
               </div>
 
-              {/* IE Seller Watchlist — the dashed border + header moved to
-                  the full-width Member State Systems band rendered at the
-                  container root (so the MS area spans the whole pipeline).
-                  The factory sits on top of the band (zIndex:1) with a
-                  transparent wrapper that only reserves layout space. */}
+              {/* IE Seller Watchlist — sits on the full-width MS band
+                  (zIndex:1). Internal solid Arrow removed; the dashed
+                  Entry→IE and IE→Near-RT arrows are drawn in the SVG
+                  overlay so they anchor on the factory's actual left /
+                  right edges instead of the wrapper's edges. The
+                  marginTop bumps this row down by RT_MS_GAP−LGAP so the
+                  gap between RT and MS is the widened one. */}
               <div style={{ height: MS_H, display: 'flex', alignItems: 'center',
-                            position: 'relative', zIndex: 1 }}>
+                            position: 'relative', zIndex: 1,
+                            marginTop: RT_MS_GAP - LGAP }}>
                 <div style={{
                   width: ZONE_W, height: '100%', boxSizing: 'border-box',
                   padding: '6px 10px 6px 10px',
                 }}>
                   <div style={{ display: 'flex', justifyContent: 'center',
                                 alignItems: 'center', height: '100%', paddingTop: 16 }}>
-                    <FactoryNode icon="🇮🇪" label="IE Seller Watchlist" sm width={RT_FACTORY_W}
-                      tooltip="IE Seller Watchlist — Ireland-specific watchlist managed by the Irish customs authority. Only processes IE-bound orders; others are silently dropped. Uniform 1–5 s latency simulating a remote server. Can arrive after the assessment timer (3 s), demonstrating late-arriving engine results." />
-                    <div style={{ width: 8 }} />
-                    <Arrow />
+                    <div ref={ieWatchlistRef}>
+                      <FactoryNode icon="🇮🇪" label={signalLabel("ireland_watchlist")} sm width={RT_FACTORY_W}
+                        tooltip={`${signalLabel("ireland_watchlist")} — Ireland-specific watchlist managed by the Irish customs authority. Only processes IE-bound orders; others are silently dropped. Uniform 1–5 s latency simulating a remote server. Can arrive after the assessment timer (3 s), demonstrating late-arriving engine results.`} />
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1317,16 +1432,10 @@ function PipelineDiagram({ pipeline }) {
             <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
               <div style={{ height: OV_H, display: 'flex', alignItems: 'center' }}><Arrow /></div>
               <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}><Arrow /></div>
-              {/* MS zone: dashed arrow + vertical line up to the RT Risk Outcome broker */}
-              <div style={{ height: MS_H, display: 'flex', alignItems: 'center' }}>
-                <svg width={28} height={MS_H} style={{ flex: '0 0 28px', overflow: 'visible' }}>
-                  {/* Horizontal dashed arrow from MS zone */}
-                  <line x1={0} y1={MS_H / 2} x2={22} y2={MS_H / 2} stroke="#adb5bd" strokeWidth={2} strokeDasharray="4,3" />
-                  {/* Vertical dashed line going up to meet the RT broker row above */}
-                  <line x1={22} y1={MS_H / 2} x2={22} y2={-(LGAP + RT_H / 2)} stroke="#adb5bd" strokeWidth={2} strokeDasharray="4,3" />
-                  <polygon points={`18,${-(LGAP + RT_H / 2) + 4} 26,${-(LGAP + RT_H / 2) + 4} 22,${-(LGAP + RT_H / 2)}`} fill="#adb5bd" />
-                </svg>
-              </div>
+              {/* MS row spacer — the dashed L arrow (IE Seller → Near RT
+                  broker) is now drawn in the SVG overlay so it anchors
+                  on IE Seller's right edge instead of the zone edge. */}
+              <div style={{ height: MS_H, marginTop: RT_MS_GAP - LGAP }} />
             </div>
 
             {/* Output brokers — OV validation + RT Risk Outcome at RT height */}
@@ -1337,15 +1446,17 @@ function PipelineDiagram({ pipeline }) {
                   tooltip="ORDER_VALIDATION — field-completeness outcome per order. Consumed by the Automated Assessment Factory." />
               </div>
               <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
-                <BrokerNode label="Near Real-time Risk Signals" topicKey="RT_RISK_OUTCOME"
-                  count={(ev.rt_risk_1_outcome || 0) + (ev.rt_risk_2_outcome || 0) + (ev.rt_risk_3_outcome || 0) + (ev.rt_risk_4_outcome || 0)} sm width={OUT_BROKER_W}
-                  tooltip="Near Real-time Risk Signals — unified topic. All risk engines (EU + Member State) publish here with an engine identifier. The Automated Assessment Factory subscribes and computes a consolidated risk score.">
-                  <FlaggedBadge flagged={(rf.rt_risk_1_flagged || 0) + (rf.rt_risk_2_flagged || 0) + (rf.rt_risk_3_flagged || 0) + (rf.rt_risk_4_flagged || 0)}
-                    total={(ev.rt_risk_1_outcome || 0) + (ev.rt_risk_2_outcome || 0) + (ev.rt_risk_3_outcome || 0) + (ev.rt_risk_4_outcome || 0)} />
-                </BrokerNode>
+                <div ref={rtRiskBrokerRef}>
+                  <BrokerNode label="Near Real-Time Risk Signals" topicKey="RT_RISK_OUTCOME"
+                    count={(ev.rt_risk_1_outcome || 0) + (ev.rt_risk_2_outcome || 0) + (ev.rt_risk_3_outcome || 0) + (ev.rt_risk_4_outcome || 0)} sm width={OUT_BROKER_W}
+                    tooltip="Near Real-Time Risk Signals — unified topic. All risk engines (EU + Member State) publish here with an engine identifier. The Automated Assessment Factory subscribes and computes a consolidated risk score.">
+                    <FlaggedBadge flagged={(rf.rt_risk_1_flagged || 0) + (rf.rt_risk_2_flagged || 0) + (rf.rt_risk_3_flagged || 0) + (rf.rt_risk_4_flagged || 0)}
+                      total={(ev.rt_risk_1_outcome || 0) + (ev.rt_risk_2_outcome || 0) + (ev.rt_risk_3_outcome || 0) + (ev.rt_risk_4_outcome || 0)} />
+                  </BrokerNode>
+                </div>
               </div>
               {/* Empty space at MS_H to preserve the column height */}
-              <div style={{ height: MS_H }} />
+              <div style={{ height: MS_H, marginTop: RT_MS_GAP - LGAP }} />
             </div>
 
             {/* Fan-in: 2 output brokers → center line at yRT */}
@@ -1358,8 +1469,15 @@ function PipelineDiagram({ pipeline }) {
               return (
                 <>
                   <div style={{ height: ROW1_H, paddingTop: cPad, boxSizing: 'border-box' }}>
-                    <FactoryNode icon="🎯" label="Automated Assessment Factory" description="consolidates risk outcomes" sm
-                      tooltip="Automated Assessment Factory — collects risk outcomes from all engines, computes a consolidated score (flagged/total, with confidence), then routes: score < 33% → Release, 33–66% → Investigate, > 66% → Retain." />
+                    {/* Fixed 90 px flex-centered band matches the
+                        Near Real-time Risk Signals / Assessment Outcome
+                        brokers' visual height, so the Factory sits on
+                        yRT regardless of its own (shorter) natural
+                        height now that the description line is gone. */}
+                    <div style={{ height: 90, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      <FactoryNode icon="🎯" label="Automated Assessment" sm
+                        tooltip="Automated Assessment — collects risk outcomes from all engines, computes a consolidated score (flagged/total, with confidence), then routes: score < 33% → Release, 33–66% → Investigate, > 66% → Retain." />
+                    </div>
                   </div>
                   <div style={{ height: ROW1_H, paddingTop: cPad + 30, boxSizing: 'border-box' }}>
                     <Arrow />
@@ -1388,11 +1506,31 @@ function PipelineDiagram({ pipeline }) {
               const rTopPad = midY - rTotalH / 2            // padding from container top to first row
               const rTopY   = rTopPad + rRowH / 2           // center of top row
               const rBotY   = rTopPad + rRowH + rGap + rRowH / 2  // center of bottom row
+              // Third row (MS Consuming Systems) — vertically centered on
+              // yMS so the box sits INSIDE the Member State Systems band.
+              // rMsConsumerMargin is the gap between Consolidation row bottom
+              // and the MS Consumer row top.
+              const row2Bottom = rTopPad + rRowH + rGap + rRowH
+              // The flex gap (rGap) still applies between row 2 and row 3,
+              // so marginTop only needs to add the REMAINING distance to
+              // land row 3 centered on yMS.
+              const rMsConsumerMargin = Math.max(
+                0,
+                (yMS - rRowH / 2) - row2Bottom - rGap,
+              )
 
-              const colStyle = { height: ROW1_H, paddingTop: rTopPad, boxSizing: 'border-box' }
+              // No fixed height on the right-side column: let it grow to
+              // fit the 3 rows + MS margin. The previous `height: ROW1_H`
+              // clipped the 3rd row (MS Consuming Systems) so it never
+              // appeared in the viewport.
+              const colStyle = { paddingTop: rTopPad, boxSizing: 'border-box' }
               return (
                 <>
-                  <FanOutSVG height={ROW1_H} targetYs={[rTopY, rBotY]} width={48} />
+                  <div ref={rightFanOutRef} style={{ flex: '0 0 48px', display: 'flex' }}>
+                    <FanOutSVG height={ROW1_H} targetYs={[rTopY, rBotY]} width={48}
+                      targetEndXs={[undefined, overlayPaths?.rightFanBotEndX && overlayPaths.rightFanBotEndX > 42
+                        ? overlayPaths.rightFanBotEndX : undefined]} />
+                  </div>
 
                   <div style={colStyle}>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: rGap }}>
@@ -1406,18 +1544,26 @@ function PipelineDiagram({ pipeline }) {
                           tooltip="INVESTIGATION_OUTCOME — produced by the Custom & Tax Risks Management System on case closure. Consumed by the Consolidation Factory." /></div>
                       </div>
                       <div style={{ height: rRowH, display: 'flex', alignItems: 'center', gap: 0 }}>
-                        <div ref={dbStoreRef}><FactoryNode icon="🚪" label="Consolidation Factory" description="emits events for MS operational system" sm
-                          tooltip="Consolidation Factory — subscribes to Assessment Outcome (release + retain routes) and Investigation Outcome. Emits a single terminal event per completed order on the Events for MS Operational System broker." /></div>
-                        {/* Stretchy arrow: flex-grows so Custom Outcome aligns with Investigation Outcome above */}
-                        <div style={{ flex: 1, display: 'flex', alignItems: 'center', minWidth: 60 }}>
+                        {/* Spacer pushes Final Consolidation to the
+                            right so it sits next to the MS-outcome
+                            broker; the overlay arrows retarget via the
+                            dbStoreRef measurement. */}
+                        <div style={{ flex: 1 }} />
+                        <div ref={dbStoreRef}><FactoryNode icon="🚪" label="Final Consolidation" sm
+                          tooltip="Final Consolidation — subscribes to Assessment Outcome (release + retain routes) and Investigation Outcome. Emits a single terminal event per completed order on the Consolidated Events for MS Operational System(s) broker." /></div>
+                        {/* Short fixed arrow from Final Consolidation to the terminal broker */}
+                        <div style={{ width: 60, display: 'flex', alignItems: 'center', flex: '0 0 60px' }}>
                           <div style={{ flex: 1, height: 2, background: '#adb5bd' }} />
                           <div style={{ width: 0, height: 0, borderTop: '4px solid transparent', borderBottom: '4px solid transparent', borderLeft: '6px solid #adb5bd', flex: '0 0 auto' }} />
                         </div>
                         <div ref={dbHubRef}>
-                          <BrokerNode label="Events for MS Operational System" topicKey="CUSTOM_OUTCOME" sm width={OUT_BROKER_W}
+                          <BrokerNode label="Consolidated Events for MS Operational System(s)" topicKey="CUSTOM_OUTCOME" sm width={OUT_BROKER_W}
                             count={customTotal}
-                            tooltip={`Events for MS Operational System (terminal broker) — ${customTotal} events.`}>
-                            <CustomOutcomeBreakdown s={customStatus} />
+                            tooltip={`Consolidated Events for MS Operational System(s) (terminal broker) — ${customTotal} events.`}>
+                            <ReleaseRetainBadges
+                              release={(customStatus.automated_release || 0) + (customStatus.custom_release || 0)}
+                              retain={(customStatus.automated_retain || 0) + (customStatus.custom_retain || 0)}
+                            />
                           </BrokerNode>
                         </div>
                       </div>
@@ -1426,12 +1572,12 @@ function PipelineDiagram({ pipeline }) {
                           broker, sits inside the MS band at the bottom.
                           marginTop pushes the row into the MS band's Y range. */}
                       <div style={{ height: rRowH, display: 'flex', alignItems: 'center',
-                                    gap: 0, marginTop: rGap, position: 'relative', zIndex: 1 }}>
+                                    gap: 0, marginTop: rMsConsumerMargin, position: 'relative', zIndex: 1 }}>
                         <div style={{ flex: 1 }} />
                         <div ref={msConsumerRef}>
-                          <FactoryNode icon="📦" label="Member State Consuming Systems" sm
+                          <FactoryNode icon="📦" label="MS Operational System(s)*" sm
                             width={OUT_BROKER_W}
-                            tooltip="Member State Consuming Systems — downstream operational systems in the Member State (customs clearance, tax assessment, enforcement workflow) that consume the terminal events emitted by the Consolidation Factory." />
+                            tooltip="MS Operational System(s) — downstream operational systems in the Member State (customs clearance, tax assessment, enforcement workflow) that consume the terminal events emitted by the Final Consolidation factory. Not modelled in this POC." />
                         </div>
                       </div>
                     </div>
@@ -1440,37 +1586,53 @@ function PipelineDiagram({ pipeline }) {
               )
             })()}
 
+            {/* Right-side spacer — widens the container a little past the
+                Member State Consuming Systems factory so the full-width MS
+                band (position:absolute; right:0) extends beyond the right-
+                most EU content and the MS area visually dominates on the
+                right, making the EU / Member State split more obvious. */}
+            <div style={{ width: 40, flex: '0 0 40px', height: ROW1_H }} />
+
             {/* SVG overlay: subscription arrows that loop back to earlier components */}
             {overlayPaths && (() => {
               const grey = '#adb5bd'
-              const topRunwayY = 4                                        // just inside the top edge
-              // Keep the Sales Order → Consolidation runway INSIDE the EU
-              // systems area — route it just below the Consolidation
-              // Factory (dby is its bottom edge) but ABOVE the MS band
-              // (which starts at OV_H + LGAP + RT_H + LGAP). The small
-              // gap between those two is where the runway runs.
-              const msBandTop = OV_H + LGAP + RT_H + LGAP
-              const bottomRunwayY = Math.min(
-                overlayPaths.dby + 15,
-                msBandTop - 5,
-              )
+              // Runway sits ABOVE the Sales Order Validation zone
+              // (whose top is at y=0 of containerRef). Negative y is
+              // safe because the overlay SVG has overflow:visible and
+              // the parent pipeline wrapper has a 20 px top padding.
+              const topRunwayY = -18
+              // Sales Order → Consolidation Factory runway — routed in
+              // the newly-widened EU gap BETWEEN the RT zone bottom and
+              // the MS band top. Centered in the gap so it clearly sits
+              // outside the Real-Time Risk Assessment box above.
+              // Lifted 10 px above the mid-gap so the runway clears
+               // the Connector overlay that now sits above the MS band.
+               const bottomRunwayY = (rtBottom + msBandTop) / 2 - 10
               // Single exit point: right edge of Entry, vertically centred
               const startX = overlayPaths.ex
               const startY = overlayPaths.ey
+              // Shared vertical trunk for every Entry-origin arrow —
+              // aligned with the FanOutMixedSVG spine so the three
+              // overlay arrows (to C&T, Consolidation, IE Seller) leave
+              // from the same axis as the fan-out arrows (to Sales Order
+              // Validation and Real-Time Risk Assessment). Fallback to
+              // startX if the measurement hasn't landed yet.
+              const trunkX = overlayPaths.entryTrunkX > 0
+                ? overlayPaths.entryTrunkX
+                : startX
               return (
                 <svg style={{ position: 'absolute', left: 0, top: 0, width: '100%', height: '100%',
                               pointerEvents: 'none', overflow: 'visible' }}>
 
-                  {/* 1. Sales Order Event → C&T Risk Management (up from entry, right, down into C&T) */}
+                  {/* 1. Sales Order Event → C&T Risk Management
+                       Short horizontal stub from Entry right edge to the
+                       shared trunk, then up along the trunk, right along
+                       the top runway, down into C&T. */}
                   <polyline
-                    points={`${startX},${startY} ${startX},${topRunwayY} ${overlayPaths.ctx},${topRunwayY} ${overlayPaths.ctx},${overlayPaths.cty}`}
+                    points={`${startX},${startY} ${trunkX},${startY} ${trunkX},${topRunwayY} ${overlayPaths.ctx},${topRunwayY} ${overlayPaths.ctx},${overlayPaths.cty}`}
                     stroke={grey} strokeWidth="1.5" fill="none" />
                   <polygon points={`${overlayPaths.ctx - 4},${overlayPaths.cty - 2} ${overlayPaths.ctx + 4},${overlayPaths.cty - 2} ${overlayPaths.ctx},${overlayPaths.cty + 4}`}
                            fill={grey} />
-                  <text x={(startX + overlayPaths.ctx) / 2} y={topRunwayY + 10}
-                        textAnchor="middle" fontSize="8" fill={grey} fontWeight="600">
-                    Sales Order Event → C&amp;T Risk Management
-                  </text>
 
                   {/* 2. Investigation Outcome → Exit Process Factory
                        Zigzag: down from Inv Outcome, left between C&T and Custom Outcome, down into Exit Process */}
@@ -1485,10 +1647,6 @@ function PipelineDiagram({ pipeline }) {
                             stroke={grey} strokeWidth="1.5" fill="none" />
                           <polygon points={`${overlayPaths.dbx - 4},${overlayPaths.dbTop} ${overlayPaths.dbx + 4},${overlayPaths.dbTop} ${overlayPaths.dbx},${overlayPaths.dbTop + 6}`}
                                    fill={grey} />
-                          <text x={(zigX + overlayPaths.dbx) / 2} y={midY - 4}
-                                textAnchor="middle" fontSize="7" fill={grey} fontWeight="600">
-                            Inv Outcome → Exit Process
-                          </text>
                         </>
                       )
                     })()
@@ -1498,14 +1656,10 @@ function PipelineDiagram({ pipeline }) {
                   {overlayPaths.dbx > 0 && (
                     <>
                       <polyline
-                        points={`${startX},${startY} ${startX},${bottomRunwayY} ${overlayPaths.dbx},${bottomRunwayY} ${overlayPaths.dbx},${overlayPaths.dby}`}
+                        points={`${startX},${startY} ${trunkX},${startY} ${trunkX},${bottomRunwayY} ${overlayPaths.dbx},${bottomRunwayY} ${overlayPaths.dbx},${overlayPaths.dby}`}
                         stroke={grey} strokeWidth="1.5" fill="none" />
                       <polygon points={`${overlayPaths.dbx - 4},${overlayPaths.dby + 6} ${overlayPaths.dbx + 4},${overlayPaths.dby + 6} ${overlayPaths.dbx},${overlayPaths.dby}`}
                                fill={grey} />
-                      <text x={(startX + overlayPaths.dbx) / 2} y={bottomRunwayY - 4}
-                            textAnchor="middle" fontSize="8" fill={grey} fontWeight="600">
-                        Sales Order Event → Consolidation Factory
-                      </text>
                     </>
                   )}
 
@@ -1519,6 +1673,35 @@ function PipelineDiagram({ pipeline }) {
                         stroke={grey} strokeWidth="1.5" fill="none" />
                       <polygon
                         points={`${overlayPaths.mscX - 4},${overlayPaths.mscTopY - 6} ${overlayPaths.mscX + 4},${overlayPaths.mscTopY - 6} ${overlayPaths.mscX},${overlayPaths.mscTopY}`}
+                        fill={grey} />
+                    </>
+                  )}
+
+                  {/* 5. Sales-order Event broker → IE Seller Watchlist (dashed).
+                       Short horizontal stub from Entry right edge over to
+                       the shared trunk, then down the trunk to the IE
+                       Seller row, then right to the factory's LEFT edge. */}
+                  {overlayPaths.ieLeftX > 0 && (
+                    <>
+                      <polyline
+                        points={`${startX},${startY} ${trunkX},${startY} ${trunkX},${overlayPaths.ieMidY} ${overlayPaths.ieLeftX},${overlayPaths.ieMidY}`}
+                        stroke={grey} strokeWidth="1.5" fill="none" strokeDasharray="4,3" />
+                      <polygon
+                        points={`${overlayPaths.ieLeftX - 6},${overlayPaths.ieMidY - 4} ${overlayPaths.ieLeftX - 6},${overlayPaths.ieMidY + 4} ${overlayPaths.ieLeftX},${overlayPaths.ieMidY}`}
+                        fill={grey} />
+                    </>
+                  )}
+
+                  {/* 6. IE Seller Watchlist → Near Real-time Risk Signals
+                       broker (dashed). Starts at the factory's RIGHT edge,
+                       goes right + up, arrives at the broker's left edge. */}
+                  {overlayPaths.ieRightX > 0 && overlayPaths.rtBrokerLeftX > 0 && (
+                    <>
+                      <polyline
+                        points={`${overlayPaths.ieRightX},${overlayPaths.ieMidY} ${overlayPaths.rtBrokerLeftX - 12},${overlayPaths.ieMidY} ${overlayPaths.rtBrokerLeftX - 12},${overlayPaths.rtBrokerMidY} ${overlayPaths.rtBrokerLeftX},${overlayPaths.rtBrokerMidY}`}
+                        stroke={grey} strokeWidth="1.5" fill="none" strokeDasharray="4,3" />
+                      <polygon
+                        points={`${overlayPaths.rtBrokerLeftX - 6},${overlayPaths.rtBrokerMidY - 4} ${overlayPaths.rtBrokerLeftX - 6},${overlayPaths.rtBrokerMidY + 4} ${overlayPaths.rtBrokerLeftX},${overlayPaths.rtBrokerMidY}`}
                         fill={grey} />
                     </>
                   )}
@@ -1538,19 +1721,16 @@ function PipelineDiagram({ pipeline }) {
         {/* Element types */}
         <LegendItem color="var(--eu-blue)" bg="var(--eu-blue-light)" label="Event Broker" />
         <LegendItem color="#868e96" bg="#f8f9fa" label="Factory" />
-        <LegendItem color="#8fb8de" bg="#f6f9fc" label="Member State Risk Monitors" />
-        <LegendItem color="var(--eu-blue)" bg="var(--eu-blue-light)" label="Events for MS Operational System (terminal broker)" />
-        <LegendItem color="var(--text-muted)" bg="#ffffff" label="Processing zone" dashed />
 
-        {/* Score badges */}
-        <LegendItem color="#1f7a3c" bg="#e8f5e9" label="Release (green)" />
-        <LegendItem color="#e6820a" bg="#fff3e0" label="Investigate (amber)" />
-        <LegendItem color="#c0392b" bg="#fde8e8" label="Retain (red)" />
+        {/* Score badges — same pill style as the ScoreBadges rendered
+            inside the Assessment Outcome broker. */}
+        <LegendBadge bg="#d4edda" color="#155724" border="#c3e6cb" label="Recommend Release" />
+        <LegendBadge bg="#fff3cd" color="#856404" border="#ffc107" label="To be investigated" />
+        <LegendBadge bg="#fde8e8" color="#c0392b" border="#f5c6cb" label="Recommend Control" />
 
-        <div style={{ marginLeft: 8, fontSize: 11, color: 'var(--text-muted)' }}>
-          Dashed labels indicate additional subscriptions (back-references to earlier brokers).
-          Counts reflect events persisted since last reset.
-        </div>
+        <span style={{ marginLeft: 8, fontSize: 11, color: 'var(--text-muted)', fontStyle: 'italic' }}>
+          (*) not modelled in our POC
+        </span>
       </div>
     </div>
   )
@@ -1568,21 +1748,36 @@ function LegendItem({ color, bg, label, dashed }) {
   )
 }
 
+// Pill-style swatch matching the ScoreBadges rendered inside the
+// Assessment Outcome broker, so the legend visually ties back to
+// the in-diagram badges.
+function LegendBadge({ bg, color, border, label }) {
+  return (
+    <span style={{
+      background: bg, color, border: `1px solid ${border}`,
+      padding: '1px 6px', borderRadius: 8,
+      fontSize: 10, fontWeight: 700,
+    }}>
+      {label}
+    </span>
+  )
+}
+
 // ── Event counts table ────────────────────────────────────────────────────────
 
 const TOPIC_META = [
-  { key: 'sales_order_event',                   label: 'Sales-order Event Broker',        factory: 'Simulation loop',                    color: '#0050a0' },
-  { key: 'order_validation',                    label: 'Sales Order Validation',           factory: 'Sales Order Validation Factory',     color: '#1f7a3c' },
-  { key: 'rt_risk_1_outcome',                   label: 'RT Risk 1 Outcome',                factory: 'Real-Time Risk Assessment 1',        color: '#6f42c1' },
-  { key: 'rt_risk_2_outcome',                   label: 'RT Risk 2 Outcome',                factory: 'Real-Time Risk Assessment 2',        color: '#6f42c1' },
-  { key: 'rt_score',                            label: 'RT Risk Outcome',                  factory: 'Automated Assessment Factory (consolidation)',      color: '#e6820a' },
+  { key: 'sales_order_event',                   label: 'Sales Order Broker',                    factory: 'Simulation loop',                              color: '#0050a0' },
+  { key: 'order_validation',                    label: 'Sales Order Validation',                 factory: 'Sales Order Validation Factory',               color: '#1f7a3c' },
+  { key: 'rt_risk_1_outcome',                   label: 'Near Real-Time Risk Signal 1',           factory: 'Product Category - VAT Rate Consistency',      color: '#6f42c1' },
+  { key: 'rt_risk_2_outcome',                   label: 'Near Real-Time Risk Signal 2',           factory: 'VAT Product Category Misclassification',       color: '#6f42c1' },
+  { key: 'rt_score',                            label: 'Near Real-Time Risk Outcome',            factory: 'Automated Assessment (consolidation)',         color: '#e6820a' },
   // arrival_notification removed (Goods Transport flow eliminated)
-  { key: 'release_event',                       label: 'Release Outcome (green)',          factory: 'Automated Assessment Factory',                     color: '#1f7a3c' },
-  { key: 'retain_event',                        label: 'Release Outcome (red)',            factory: 'Automated Assessment Factory',                     color: '#c0392b' },
-  { key: 'investigate_event',                   label: 'Release Outcome (amber)',          factory: 'Automated Assessment Factory',                     color: '#e6820a' },
-  { key: 'agent_retain_event',                  label: 'Retain Post Inv.',                 factory: 'Investigation Agent Worker',          color: '#c0392b' },
-  { key: 'agent_release_event',                 label: 'Investigation Clearance',          factory: 'Investigation Agent Worker',          color: '#1f7a3c' },
-  { key: 'release_after_investigation_event',   label: 'Release Post Inv.',                factory: 'Release After Investigation Factory', color: '#2e7d32' },
+  { key: 'release_event',                       label: 'Recommend Release Outcome (green)',      factory: 'Automated Assessment',                         color: '#1f7a3c' },
+  { key: 'retain_event',                        label: 'Recommend Control Outcome (red)',        factory: 'Automated Assessment',                         color: '#c0392b' },
+  { key: 'investigate_event',                   label: 'To be investigated Outcome (amber)',     factory: 'Automated Assessment',                         color: '#e6820a' },
+  { key: 'agent_retain_event',                  label: 'Recommend Control Post Inv.',            factory: 'Investigation Agent Worker',                   color: '#c0392b' },
+  { key: 'agent_release_event',                 label: 'Investigation Clearance',                factory: 'Investigation Agent Worker',                   color: '#1f7a3c' },
+  { key: 'release_after_investigation_event',   label: 'Recommend Release Post Inv.',            factory: 'Release After Investigation Factory',          color: '#2e7d32' },
 ]
 
 function EventCountsTable({ pipeline }) {
@@ -1616,7 +1811,7 @@ function EventCountsTable({ pipeline }) {
                       background: t.color + '18', color: t.color,
                       border: `1px solid ${t.color}40`,
                       padding: '2px 8px', borderRadius: 8, fontSize: 11, fontWeight: 700,
-                    }}>{t.key}</span>
+                    }}>{t.label}</span>
                   </td>
                   <td style={{ color: 'var(--text-secondary)' }}>{t.factory}</td>
                   <td style={{ textAlign: 'right', fontWeight: 700 }}>{fmt(count)}</td>
@@ -1657,6 +1852,7 @@ function EventCountsTable({ pipeline }) {
 export default function SimulationPage() {
   const [status,   setStatus]   = useState(null)
   const [pipeline, setPipeline] = useState(null)
+  const [riskSignals, setRiskSignals] = useState([])
   const [presentationMode, setPresentationMode] = useState(false)
   // Ref so the SSE callback always sees the latest value without re-subscribing.
   const presentationRef = useRef(false)
@@ -1672,6 +1868,15 @@ export default function SimulationPage() {
   // { status, pipeline } snapshot at ~5 Hz, giving us smooth event-by-event UI
   // updates without polling. A slow 15 s REST safety-net poll covers the rare
   // case where the stream drops (e.g. backend restart).
+  useEffect(() => {
+    // One-time fetch of the shared reference payload. risk_engine_signals
+    // drives the canonical names used on the engine factories below so
+    // this view and the C&T case view stay in sync.
+    getReference()
+      .then(ref => setRiskSignals(ref?.risk_engine_signals || []))
+      .catch(() => {})
+  }, [])
+
   useEffect(() => {
     // Initial REST fetch so the page paints immediately rather than waiting for
     // the first SSE frame.
@@ -1740,7 +1945,7 @@ export default function SimulationPage() {
 
       <SimControls status={status} onRefresh={() => { refreshStatus(); refreshPipeline() }} />
       <KpiStrip pipeline={pipeline} />
-      <PipelineDiagram pipeline={pipeline} status={status} />
+      <PipelineDiagram pipeline={pipeline} status={status} riskSignals={riskSignals} />
       <EventCountsTable pipeline={pipeline} />
     </div>
   )
