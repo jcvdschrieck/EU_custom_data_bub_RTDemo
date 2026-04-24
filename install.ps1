@@ -105,6 +105,15 @@ LM_STUDIO_BASE_URL=$($config.LM_STUDIO_URL)/v1
 LM_STUDIO_MODEL=$($config.LM_STUDIO_MODEL)
 "@ | Set-Content -Path (Join-Path $ScriptDir 'vat_fraud_detection\.env')
 
+# ── Warm the HF embedder cache ──────────────────────────────────────────
+# Downloads the all-MiniLM-L6-v2 SentenceTransformer weights (~90 MB)
+# into the local HF cache so the VAT Fraud Detection agent can run in
+# offline mode at runtime. Without this, the agent subprocess errors
+# out when huggingface_hub >= 1.7 tries to reach hub.hf.co on every
+# SentenceTransformer() init.
+Write-Host "==> Warming the Hugging Face embedder cache (~90 MB, one-off)"
+& $venvPython -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+
 # ── Seed databases ──────────────────────────────────────────────────────
 Write-Host "==> Seeding databases"
 & $venvPython seed_databases.py

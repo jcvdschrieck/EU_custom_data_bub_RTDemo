@@ -135,6 +135,16 @@ LM_STUDIO_BASE_URL=${LM_STUDIO_URL}/v1
 LM_STUDIO_MODEL=${LM_STUDIO_MODEL}
 EOF
 
+# ── Step 7b: warm the HF embedder cache ─────────────────────────────────
+# Downloads the all-MiniLM-L6-v2 SentenceTransformer weights (~90 MB)
+# into the local HF cache so the VAT Fraud Detection agent can load the
+# model in offline mode at runtime. Without this, the agent subprocess
+# errors out when huggingface_hub >= 1.7 tries to reach hub.hf.co on
+# every SentenceTransformer() init (see lib/embedder.py for the offline
+# mode that this cache-warm underpins).
+echo "==> Warming the Hugging Face embedder cache (~90 MB, one-off)"
+python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+
 # ── Step 8: seed databases ──────────────────────────────────────────────
 echo "==> Seeding databases"
 python seed_databases.py

@@ -7,19 +7,13 @@ calls analyser.analyse(), and writes {"verdict": ..., "reasoning": ...} to stdou
 Designed to be invoked as a subprocess from EU_custom_data_bub_RTDemo so that
 the two projects' `lib` packages do not conflict.
 """
-# Force Hugging Face Hub into offline mode BEFORE any transformers /
-# sentence-transformers imports. The RAG embedder model
-# ("all-MiniLM-L6-v2") is already cached locally by build_knowledge_base.py;
-# without this guard, sentence-transformers tries to reach HF to check
-# for adapter configs on every init and trips over a httpx client-closed
-# bug with huggingface_hub >= 1.7 when invoked from this subprocess.
-import os
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-
 import json
 import sys
 import traceback
+
+# The HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE env vars are set inside
+# lib/embedder.py at module import, so every caller of the embedder
+# (this subprocess, Streamlit pages, ad-hoc scripts) is protected.
 
 def main():
     try:

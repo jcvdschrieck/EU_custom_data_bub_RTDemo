@@ -149,10 +149,11 @@ What the installer does:
 
 The installer is idempotent — re-run it any time after changing `config.env` to regenerate the `.env` files.
 
-**Optional after install (~5 min)** — build the RAG knowledge base so the VAT Fraud Detection Agent can cite Irish legislation:
+**Recommended after install (~5 min)** — build the RAG knowledge base so the VAT Fraud Detection Agent can cite Irish legislation:
 ```bash
 cd vat_fraud_detection && python3 build_knowledge_base.py --minilm-only
 ```
+The installer itself already pre-downloads the embedder model so the agent can run offline; this extra step just populates the legislation index the agent retrieves from at runtime.
 
 #### Customising ports and the LM Studio model
 
