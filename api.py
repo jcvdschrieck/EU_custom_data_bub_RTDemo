@@ -2063,24 +2063,43 @@ async def api_rg_case_ask(case_id: str, body: dict):
     if not question:
         return JSONResponse(status_code=400, content={"detail": "No question provided"})
 
+    # Budget the prompt so it fits inside LM Studio's configured context
+    # window. The stored AI_Analysis and long order lists can easily push
+    # past Mistral-7B's default 4-8K context after a VAT Fraud Detection
+    # run on a 100-order cluster, producing HTTP 400 from /v1/chat/completions.
     orders = get_case_orders(case_id)
-    order_lines = "\n".join(
+    _MAX_ORDER_LINES = 15
+    _MAX_ANALYSIS_CHARS = 1500
+    _MAX_COMM_ENTRIES = 5
+
+    order_lines_all = [
         f"  - {o.get('Product_Description','?')} | €{o.get('Product_Value',0)} | "
         f"VAT {(o.get('VAT_Rate',0) or 0)*100:.0f}% | "
         f"{o.get('Country_Origin','?')} → {o.get('Country_Destination','?')}"
         for o in orders
-    )
+    ]
+    if len(order_lines_all) > _MAX_ORDER_LINES:
+        shown = order_lines_all[:_MAX_ORDER_LINES]
+        shown.append(f"  … and {len(order_lines_all) - _MAX_ORDER_LINES} more orders (same cluster)")
+        order_lines = "\n".join(shown)
+    else:
+        order_lines = "\n".join(order_lines_all)
+
     engine_info = (
         f"Engine scores: VAT Ratio={case.get('Engine_VAT_Ratio',0):.2f}, "
         f"ML Watchlist={case.get('Engine_ML_Watchlist',0):.2f}, "
         f"IE Seller={case.get('Engine_IE_Seller_Watchlist',0):.2f}, "
         f"Vagueness={case.get('Engine_Description_Vagueness',0):.2f}"
     )
+
     ai_analysis = case.get("AI_Analysis") or "No AI analysis performed yet."
+    if len(ai_analysis) > _MAX_ANALYSIS_CHARS:
+        ai_analysis = ai_analysis[:_MAX_ANALYSIS_CHARS].rstrip() + " …[truncated]"
+
     comm = case.get("Communication", []) or []
     comm_text = "\n".join(
         f"  [{c.get('date','')}] {c.get('from','')}: {c.get('action','')} — {c.get('message','')}"
-        for c in comm[-10:]
+        for c in comm[-_MAX_COMM_ENTRIES:]
     ) if comm else "No communication log entries."
 
     role = body.get("role", "customs")
@@ -2252,7 +2271,24 @@ answer, say so briefly.
         answer = _strip_trailing_offer(answer)
         return {"answer": answer, "proposal": proposal, "mode": "action"}
     except Exception as e:
-        return {"answer": f"Unable to reach AI assistant: {e}", "proposal": None, "mode": mode}
+        msg = str(e)
+        # Classify the common failure modes so the chat panel can guide
+        # the officer to a fix instead of surfacing raw httpx errors.
+        if "400" in msg and "chat/completions" in msg:
+            friendly = (
+                "The AI assistant rejected the request, most likely because the case "
+                "context exceeded LM Studio's configured context window. Open LM Studio → "
+                "the loaded model's settings → increase the context length, then retry."
+            )
+        elif "Connection" in msg or "refused" in msg.lower() or "not found" in msg.lower():
+            friendly = (
+                f"The AI assistant is not reachable at the configured LM Studio URL. "
+                f"Check that LM Studio's local server is running and serving the model. "
+                f"Underlying error: {msg}"
+            )
+        else:
+            friendly = f"Unable to reach AI assistant: {msg}"
+        return {"answer": friendly, "proposal": None, "mode": mode}
 
 
 @app.get("/api/rg/agent/queue")
