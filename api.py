@@ -2371,11 +2371,15 @@ def api_rg_tax_action(case_id: str, body: dict):
     if vat_category:
         updates["Recommended_VAT_Product_Category"] = vat_category
 
-    # Propagate status back for customs visibility
+    # Propagate status back for customs visibility. After a tax verdict
+    # the case is explicitly "Reviewed by Tax" — distinct from the initial
+    # "Under Review by Customs" — so the customs-side AI recommendation
+    # can swap in the tax-derived action instead of the stale pre-review
+    # rule-based suggestion.
     if action == "risk_confirmed":
-        updates["Status"] = STATUS.UNDER_REVIEW_BY_CUSTOMS
+        updates["Status"] = STATUS.REVIEWED_BY_TAX
     elif action == "no_limited_risk":
-        updates["Status"] = STATUS.UNDER_REVIEW_BY_CUSTOMS
+        updates["Status"] = STATUS.REVIEWED_BY_TAX
     elif action == "input_requested":
         updates["Status"] = STATUS.REQUESTED_INPUT
 

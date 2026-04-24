@@ -2098,6 +2098,12 @@ def _compute_customs_recommendation(case: dict) -> tuple[str, str]:
 
     Logic (business framing in the rationale; documented formally in
     Context/Rules in App.pptx slide 1 row 4):
+      0. If Tax Authority has already issued a verdict on this case
+         (Proposed_Action_Tax is set), the customs recommendation is
+         derived directly from it — "Confirm Risk" becomes
+         "Recommend Control", "No/Limited Risk" becomes
+         "Recommend Release". The pre-review rules below apply only
+         while the case has not yet been reviewed by Tax.
       1. If the descriptions on this case are too vague to judge the
          nature of the goods, we can neither safely retain nor release
          → recommend requesting clarification from a third party.
@@ -2111,6 +2117,19 @@ def _compute_customs_recommendation(case: dict) -> tuple[str, str]:
            in-between        → the pattern is mixed; submit to Tax for
                                a second opinion.
     """
+    # Rule 0: Tax has already spoken — trust their verdict.
+    tax_verdict = (case.get("Proposed_Action_Tax") or "").strip().lower()
+    if tax_verdict == "risk_confirmed":
+        return ("Recommend Control",
+                "Tax Authority has reviewed this case and confirmed the VAT "
+                "risk. The recommended customs action is to retain the goods "
+                "for inspection.")
+    if tax_verdict == "no_limited_risk":
+        return ("Recommend Release",
+                "Tax Authority has reviewed this case and found no/limited "
+                "VAT risk. The recommended customs action is to release the "
+                "goods.")
+
     seller      = case.get("Seller_Name") or ""
     category    = case.get("HS_Product_Category") or ""
     destination = case.get("Country_Destination") or ""
