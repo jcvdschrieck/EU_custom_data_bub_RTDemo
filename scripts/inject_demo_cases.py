@@ -196,18 +196,27 @@ def _inject_historical_cases(case: dict) -> int:
     inserted = 0
 
     with conn:
+        # Idempotent cleanup — must run ONCE before the insert loop,
+        # otherwise each iteration wipes the previous iteration's row
+        # and only the last insert survives. Clean all three tables
+        # (including orphaned Sales_Order / Sales_Order_Risk from earlier
+        # buggy runs) keyed on the target (seller, category, destination)
+        # with the CASE-H-DEMO- / SOH-DEMO- prefixes.
+        bk_rows = conn.execute(
+            "SELECT Sales_Order_Business_Key FROM Sales_Order "
+            "WHERE Seller_Name = ? AND HS_Product_Category = ? "
+            "  AND Country_Destination = ? "
+            "  AND Sales_Order_Business_Key LIKE 'SOH-DEMO-%'",
+            (case["seller_name"], case["parent_category"], case["destination"]),
+        ).fetchall()
+        for (bk,) in bk_rows:
+            conn.execute("DELETE FROM Sales_Order_Case WHERE Sales_Order_Business_Key = ?", (bk,))
+            conn.execute("DELETE FROM Sales_Order_Risk WHERE Sales_Order_Business_Key = ?", (bk,))
+            conn.execute("DELETE FROM Sales_Order WHERE Sales_Order_Business_Key = ?", (bk,))
+
         for action, ts_case in _HIST_OUTCOMES:
             case_id = f"CASE-H-DEMO-{uuid.UUID(int=rng.getrandbits(128)).hex[:8].upper()}"
             so_bk   = f"SOH-DEMO-{uuid.UUID(int=rng.getrandbits(128)).hex[:12].upper()}"
-
-            # Delete any prior demo row keyed on the same case_id so the
-            # script stays idempotent across re-runs.
-            conn.execute("DELETE FROM Sales_Order_Case WHERE Case_ID LIKE 'CASE-H-DEMO-%' "
-                         "AND Sales_Order_Business_Key IN ("
-                         "   SELECT Sales_Order_Business_Key FROM Sales_Order "
-                         "   WHERE Seller_Name = ? AND HS_Product_Category = ? "
-                         "   AND Country_Destination = ?"
-                         ")", (case["seller_name"], case["parent_category"], case["destination"]))
 
             # 1 order per case is enough to satisfy get_previous_cases' JOIN.
             value    = round(rng.uniform(70, 100), 2)
