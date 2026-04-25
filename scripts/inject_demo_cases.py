@@ -198,17 +198,20 @@ def _build_tx_rows(case: dict, rng: random.Random) -> list[dict]:
 # ── Historical cases for Case 1's "Submit for Tax Review" rec ──────────────
 
 _HIST_OUTCOMES = [
-    # 4 retained / 0 released → 100% retention → both Customs ("Recommend
-    # Control") and Tax ("Confirm Risk") rule-based recommendations are
-    # now definitive (the rule fires Confirm Risk only when retPct > 0.75).
-    # If you want Customs to instead recommend "Submit for Tax Review" so
-    # the case goes through the Tax flow, swap two entries to "release"
-    # — that gives 50% retention and both sides return "AI Uncertain" /
-    # "Submit for Tax Review" (the previous demo state).
-    ("retain", "2025-11-12"),
-    ("retain", "2026-01-08"),
-    ("retain", "2025-12-04"),
-    ("retain", "2026-02-17"),
+    # 2 retained / 2 released → 50% retention. Drives:
+    #   Customs AI Suggestion → "Submit for Tax Review" (in-between
+    #     retention, rule routes the case via Tax for a second opinion).
+    #   Tax AI Suggestion (post-fraud-agent) → "AI Uncertain" (the
+    #     Tax-side rule needs > 75% retention to flip to "Confirm Risk";
+    #     50% sits in the in-between band, leaving the call to the
+    #     officer with the fraud agent's verdict + VAT gap as evidence).
+    # This is the showcase flow: the case visibly travels Customs → Tax
+    # → back to Customs, and the operator interacts with the fraud
+    # agent + tax conversational agent along the way.
+    ("retain",  "2025-11-12"),
+    ("retain",  "2026-01-08"),
+    ("release", "2025-12-04"),
+    ("release", "2026-02-17"),
 ]
 
 
