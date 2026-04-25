@@ -12,7 +12,7 @@ $ErrorActionPreference = 'Stop'
 $ScriptDir = $PSScriptRoot
 Set-Location $ScriptDir
 
-# ── Config ──────────────────────────────────────────────────────────────
+# -- Config --------------------------------------------------------------
 $config = [ordered]@{
     BACKEND_PORT     = '8505'
     CT_FRONTEND_PORT = '8080'
@@ -28,13 +28,13 @@ if (Test-Path $configFile) {
     }
 }
 
-Write-Host "── Config ───────────────────────────────────────────────────────"
+Write-Host "-- Config -------------------------------------------------------"
 foreach ($k in $config.Keys) { Write-Host ("  {0,-16} = {1}" -f $k, $config[$k]) }
-Write-Host "────────────────────────────────────────────────────────────────"
+Write-Host "----------------------------------------------------------------"
 
 function Have($cmd) { [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
 
-# ── Python 3.11+ ────────────────────────────────────────────────────────
+# -- Python 3.11+ --------------------------------------------------------
 if (-not (Have python)) {
     if (-not (Have winget)) {
         Write-Error "winget is missing. Install App Installer from the Microsoft Store, or install Python 3.11+ manually, then re-run."
@@ -48,7 +48,7 @@ if (-not (Have python)) {
 # with an inline format string. PowerShell on Windows mangles the quotes
 # around `-c` arguments differently across major versions (5.1 vs 7+),
 # turning `'%d.%d' % sys.version_info[:2]` into `%d.%d % sys.version_info`
-# inside Python — a SyntaxError. `python --version` prints a single
+# inside Python -- a SyntaxError. `python --version` prints a single
 # unambiguous line ("Python 3.11.5") that we can regex-match.
 $pyVerOutput = (& python --version 2>&1 | Out-String).Trim()
 if ($pyVerOutput -notmatch 'Python\s+(\d+)\.(\d+)') {
@@ -57,11 +57,11 @@ if ($pyVerOutput -notmatch 'Python\s+(\d+)\.(\d+)') {
 $pyMajor = [int]$Matches[1]
 $pyMinor = [int]$Matches[2]
 if ($pyMajor -lt 3 -or ($pyMajor -eq 3 -and $pyMinor -lt 11)) {
-    Write-Error "Python $pyMajor.$pyMinor is too old (need 3.11+)."
+    Write-Error "Python ${pyMajor}.${pyMinor} is too old (need 3.11+)."
 }
-Write-Host "✓ Python $pyMajor.$pyMinor"
+Write-Host "[OK] Python ${pyMajor}.${pyMinor}"
 
-# ── Node.js 18+ ─────────────────────────────────────────────────────────
+# -- Node.js 18+ ---------------------------------------------------------
 if (-not (Have node)) {
     if (-not (Have winget)) {
         Write-Error "winget is missing. Install Node.js 18+ manually, then re-run."
@@ -80,9 +80,9 @@ $nodeMajor = [int]$Matches[1]
 if ($nodeMajor -lt 18) {
     Write-Error "Node.js $nodeVerOutput is too old (need 18+)."
 }
-Write-Host "✓ Node.js $nodeVerOutput"
+Write-Host "[OK] Node.js $nodeVerOutput"
 
-# ── Python venv + deps ──────────────────────────────────────────────────
+# -- Python venv + deps --------------------------------------------------
 $venvDir = Join-Path $ScriptDir '.venv'
 if (-not (Test-Path $venvDir)) {
     Write-Host "==> Creating Python venv at $venvDir"
@@ -93,14 +93,14 @@ Write-Host "==> Installing Python dependencies into venv"
 & $venvPython -m pip install --upgrade pip
 & $venvPython -m pip install -r requirements.txt
 
-# ── Internal frontend ───────────────────────────────────────────────────
+# -- Internal frontend ---------------------------------------------------
 Write-Host "==> Building internal frontend"
 Push-Location frontend
 & npm install
 & npm run build
 Pop-Location
 
-# ── C&T frontend (sibling directory) ────────────────────────────────────
+# -- C&T frontend (sibling directory) ------------------------------------
 $ctDir = Join-Path (Split-Path -Parent $ScriptDir) 'customsandtaxriskmanagemensystem'
 if (-not (Test-Path $ctDir)) {
     Write-Host "==> Cloning C&T frontend to $ctDir"
@@ -111,7 +111,7 @@ Push-Location $ctDir
 & npm install
 Pop-Location
 
-# ── Generated .env files ────────────────────────────────────────────────
+# -- Generated .env files ------------------------------------------------
 Write-Host "==> Writing $ctDir\.env"
 Set-Content -Path (Join-Path $ctDir '.env') -Value "VITE_API_BASE_URL=http://localhost:$($config.BACKEND_PORT)"
 
@@ -121,24 +121,24 @@ LM_STUDIO_BASE_URL=$($config.LM_STUDIO_URL)/v1
 LM_STUDIO_MODEL=$($config.LM_STUDIO_MODEL)
 "@ | Set-Content -Path (Join-Path $ScriptDir 'vat_fraud_detection\.env')
 
-# ── Warm the HF embedder cache ──────────────────────────────────────────
+# -- Warm the HF embedder cache ------------------------------------------
 # Downloads the all-MiniLM-L6-v2 SentenceTransformer weights (~90 MB)
 # into the local HF cache so the VAT Fraud Detection agent can run in
 # offline mode at runtime. Without this, the agent subprocess errors
 # out when huggingface_hub >= 1.7 tries to reach hub.hf.co on every
 # SentenceTransformer() init.
 Write-Host "==> Warming the Hugging Face embedder cache (~90 MB, one-off)"
-# Run via a tiny script file rather than -c '…' so PowerShell quoting
+# Run via a tiny script file rather than -c '...' so PowerShell quoting
 # can't mangle the inline Python (same lesson as the python --version
 # check earlier).
 & $venvPython (Join-Path $ScriptDir 'scripts\warm_hf_cache.py')
 
-# ── Seed databases ──────────────────────────────────────────────────────
+# -- Seed databases ------------------------------------------------------
 Write-Host "==> Seeding databases"
 & $venvPython seed_databases.py
 
 Write-Host ""
-Write-Host "✅ Install complete."
+Write-Host "[DONE] Install complete."
 Write-Host ""
 Write-Host "Next steps:"
 Write-Host "  1. (Optional) Install LM Studio from https://lmstudio.ai and start its"
