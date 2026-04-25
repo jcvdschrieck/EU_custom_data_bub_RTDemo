@@ -58,3 +58,8 @@ Verdict values:
 
 Cite the excerpt numbers in "reasoning" and copy section / URL exactly as shown in the
 excerpt headers into "legislation_refs".
+
+JSON SYNTAX — CRITICAL: Every `[` must be paired with a matching `]`, and every `{` must
+be paired with a matching `}`. Before ending the response, double-check that the count of
+`[` equals the count of `]` and the count of `{` equals the count of `}`. The
+"legislation_refs" array MUST be closed with `]` BEFORE the verdict's outer `}`.

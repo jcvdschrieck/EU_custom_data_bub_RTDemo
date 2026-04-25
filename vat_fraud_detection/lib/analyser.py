@@ -10,6 +10,54 @@ import time
 # Negative lookbehind on ':' ensures we don't strip :// inside URLs.
 _JSON_COMMENT_RE = re.compile(r'(?<!:)//[^\n]*')
 
+
+def _repair_json(s: str) -> str:
+    """Best-effort fixup for the common Mistral-7B JSON output bugs:
+
+      - A closer of the wrong type appears (e.g. `}` where `]` was needed
+        because the LLM forgot to close an inner array first).  Insert
+        the expected closer in front of the wrong-type one.
+      - Trailing closers are missing entirely (LLM truncated mid-structure).
+        Append the remaining open brackets in reverse-stack order.
+
+    Walks the input once with a bracket stack while honouring quoted
+    strings and backslash escapes so brackets inside string values are
+    ignored. Returns the (possibly modified) string — the caller is
+    expected to feed it back to json.loads."""
+    out: list[str] = []
+    stack: list[str] = []
+    in_string = False
+    escape = False
+    for ch in s:
+        if escape:
+            out.append(ch); escape = False; continue
+        if ch == "\\":
+            out.append(ch); escape = True; continue
+        if ch == '"':
+            out.append(ch); in_string = not in_string; continue
+        if in_string:
+            out.append(ch); continue
+        if ch == "{":
+            stack.append("}"); out.append(ch)
+        elif ch == "[":
+            stack.append("]"); out.append(ch)
+        elif ch in "}]":
+            # Insert any missing closers of a different type that were
+            # opened more recently than this matching-type closer.
+            while stack and stack[-1] != ch:
+                out.append(stack.pop())
+            if stack and stack[-1] == ch:
+                stack.pop()
+                out.append(ch)
+            # else: stray closer with no matching opener — drop it.
+        else:
+            out.append(ch)
+    # Append anything still open in reverse-stack order.
+    while stack:
+        out.append(stack.pop())
+    return "".join(out)
+
+
 from lib.models import Invoice, VATVerdict, AnalysisResult, LegislationRef
 from lib import rag
 from lib.utils import load_prompt
@@ -84,6 +132,23 @@ def analyse(invoice: Invoice) -> AnalysisResult:
     verdicts: list[VATVerdict] = []
     try:
         data = json.loads(raw)
+    except json.JSONDecodeError:
+        # Mistral-7B occasionally drops a closing bracket or emits a
+        # closer of the wrong type (e.g. `}` where `]` was needed).
+        # _repair_json walks the string and fixes the common patterns:
+        #   - Inserts the expected closer before a wrong-type closer.
+        #   - Appends any remaining open brackets at the end.
+        # Without this, json.loads silently failed → empty verdicts →
+        # downstream "uncertain" verdict with no reasoning.
+        repaired = _repair_json(raw)
+        if repaired is not None and repaired != raw:
+            try:
+                data = json.loads(repaired)
+            except json.JSONDecodeError:
+                data = {}
+        else:
+            data = {}
+    try:
         for v in data.get("verdicts", []):
             refs: list[LegislationRef] = []
             for r in v.get("legislation_refs", []):
